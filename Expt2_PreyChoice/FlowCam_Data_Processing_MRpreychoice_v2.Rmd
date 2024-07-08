@@ -1,0 +1,762 @@
+---
+title: "FlowCam Data-processing, MR prey choice"
+author: "Amelie + Holly"
+date: "2023-11-17"
+output: html_document
+---
+
+# Establish environment
+First step is to establish the environment for us to be able to process the FlowCam data, this is done by running the setup function.
+In this chunk we start by clearing my Global environment, this is optional and can be removed if not desired.
+
+Most importantly the chunk establishes the folder which we are going to work from, as well as loading in the additional meta-data we require from a .csv file.
+
+The minimum data included in the .csv file is sampling time from start of experiment, and dilution of sample before it was run in the FlowCam, as well as columns with the Flask-number, Mesodinium acclimation, prey-treatment and replicate indicator. Hence the file-name 'Dil_time.csv'.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+package.list <- c("dplyr","ggplot2",
+                  "Rmisc","tidyr",
+                  "lemon",'flowPeaks')
+
+if(!all(package.list %in% installed.packages()[,"Package"])){
+  install.packages(package.list[!(package.list %in% installed.packages()[,"Package"])])
+}
+
+
+library(dplyr)
+library(ggplot2)
+library(Rmisc)
+library(tidyr)
+library(lemon)
+library(flowPeaks)
+
+#Insert the location of your main folder for the current experiment.
+#Alter this line to refer to the file location where the excel sheet is.
+root_folder <- "/Users/hollyvm/GoogleSync/StudentWork/AmelieLEtoileGoga/MRpreychoice_Nov2023"
+
+#In the main folder create a folder name CSV_files, if named other wise change "/CSV_files" accordingly
+CSV_folder <- paste(root_folder,"/CSV_files",sep = "")
+
+#List the sub-folders of the current experiment, this would usually be one folder for each sampling day.
+Folder_list <- c("D0","D1","D2","D3","D4")
+
+expt.day <- Folder_list
+
+knitr::opts_knit$set(root.dir = root_folder)
+
+#A .csv file should be created with extra meta-data, such as data for sampling time and dilution. If other data is acquired, such as pigment extractions, include these in the this file as well.
+expt.meta <- read.csv("ALG_Expt2_OctNov2023_MRpreychoice - Dil_time.csv")
+```
+
+
+# Load special functions
+
+The Meso.flowPeaks function is a wrapper for flowPeaks that tailors its use to FlowCam data with Mesodinium and cryptophytes. The function takes a subset of data with just one organism type (either Mesodinium or cryptophytes) and partitions it using the k-means algorithm in flowPeaks. It then uses breakpoints (that can be set by the user, or which are automated) to identify the plastid colours associated with each cluster identified by flowPeaks.
+
+The function outputs an annotated dataset as well as summary statistics.
+
+```{r}
+Meso.flowPeaks <- function(dataset,flask,day,create_plot = F,unknown.partition = 5.5, bluegreen.partition = 4.5){
+  
+  # Function last updated: 21 November 2023
+  
+  # Function inputs:
+  #  dataset = csv file from the FlowCam
+  #  flask = ID number for the flask
+  #  day = experimental day
+  #  create_plot argument (T = makes plots, F = automatic setting; doesn't make plots)
+  #  unknown.partition = channel 1 partition for "unknown" cell types. Default is at 5.5
+  #  bluegreen.partition = channel 2 partition for bluegreen plastids. Default is at 4.5
+  
+  
+  # Step 1: Partition dataset to just fluorescent particles
+  dataset.fluo <- dataset[dataset$Ch1.Peak>0,]
+  dataset.fluo <- dataset.fluo[dataset.fluo$Ch2.Peak>0,]
+  
+  # Step 2: Use flowPeaks package to fit and visualize the number of clusters of points
+  invisible(capture.output(fp <- suppressMessages(flowPeaks(dataset.fluo[,c("Ch1.Peak",'Ch2.Peak')],tol=.1,h0=.4))))
+      # The "capture.output" function captures the printed output of the flowPeaks function
+      # The "invisible" function suppresses that output so it doesn't automatically print.
+      # The "suppressMessages" function suppresses the messages output of flowPeaks
+
+  # Step 3: Extract cluster assignments
+  dataset.fluo$peak <- fp$peaks.cluster
+
+  # Step 4: Assign clusters to colors (or unknown)
+  fp.data <- as.data.frame(summary(fp))
+  fp.data$plastid.color <- 'red' # Presume plastids are red in color
+  for(i in 1:dim(fp.data)[1]){
+    if(fp.data$Ch1.Peak.center[i] < unknown.partition){ # If they fall below the unknown threshold, assign them "black" color for unknown
+      fp.data$plastid.color[i] <- 'black'
+    } else{ #If not unknown, then assign them "blue" color for bluegreen plastid type
+    if(fp.data$Ch2.Peak.center[i] < bluegreen.partition){
+      fp.data$plastid.color[i] <- 'blue'
+    }
+  }}
+  dataset.fluo$peak.Ch1 <- fp.data$Ch1.Peak.center[match(dataset.fluo$peak,fp.data$cluster.id)]
+  dataset.fluo$peak.Ch2 <- fp.data$Ch2.Peak.center[match(dataset.fluo$peak,fp.data$cluster.id)]
+  dataset.fluo$plastidcolor <- fp.data$plastid.color[match(dataset.fluo$peak,fp.data$cluster.id)]
+  
+  # Step 5: Map fluorescent data back onto the dataset for export.
+  dataset.analyzed <- dataset
+  dataset.analyzed$plastidcolor <- dataset.fluo$plastidcolor[match(dataset.analyzed$Capture.ID,dataset.fluo$Capture.ID)]
+  if(dim(dataset.analyzed[is.na(dataset.analyzed$plastidcolor),])[1]>0){
+  dataset.analyzed[is.na(dataset.analyzed$plastidcolor),]$plastidcolor <- 'nonfluorescent'}
+  dataset.analyzed$plastidcolor <- factor(dataset.analyzed$plastidcolor,levels=c('red','blue','black','nonfluorescent'))
+  
+  # Step 6: Calculate summary statistics
+  counts <- as.data.frame(t(as.matrix(table(dataset.analyzed$plastidcolor))))
+  counts$tot.red <- counts$red + (counts$black + counts$nonfluorescent)*counts$red/(counts$red+counts$blue)
+  counts$tot.blue <- counts$blue + (counts$black + counts$nonfluorescent)*counts$blue/(counts$red+counts$blue)
+  counts$tot.meso <- counts$tot.blue+counts$tot.red
+  Ch1.peaks <- as.data.frame(t(as.matrix(tapply(dataset.analyzed$Ch1.Peak,dataset.analyzed$plastidcolor,FUN=mean))))
+  Ch2.peaks <- as.data.frame(t(as.matrix(tapply(dataset.analyzed$Ch2.Peak,dataset.analyzed$plastidcolor,FUN=mean))))
+  Ch1.peaks.sd <- as.data.frame(t(as.matrix(tapply(dataset.analyzed$Ch1.Peak,dataset.analyzed$plastidcolor,FUN=sd))))
+  Ch2.peaks.sd <- as.data.frame(t(as.matrix(tapply(dataset.analyzed$Ch2.Peak,dataset.analyzed$plastidcolor,FUN=sd))))
+  
+  # Step 7: Make plots if desired
+  if(create_plot==T){
+    
+    # 1. Baseline plot of all data
+    par(mfrow=c(2,2))
+    par(mar=c(2,4,2.5,0.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,ylab='Channel 2 peak (phycoerythrin)')
+    text(min(dataset.fluo$Ch1.Peak),max(dataset.fluo$Ch2.Peak),dataset.fluo$Class[1],pos=4)
+    text(min(dataset.fluo$Ch1.Peak),max(dataset.fluo$Ch2.Peak)-.15,paste(flask,', Day ',day),pos=4)
+    
+    # 2. Plot of flowpeaks package partitions
+    par(mar=c(2,2,2.5,2.5))
+    plot(fp)
+    
+    # 3. Plot of data with cluster assignments
+    par(mar=c(4,4,.5,.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,col=c('red','blue','cyan','green')[as.factor(dataset.fluo$peak)],xlab='Channel 1 peak (chlorophyll)',ylab='Channel 2 peak (phycoerythrin)')
+    
+    # 4. Plot of data assigned by plastid type
+    par(mar=c(4,2,.5,2.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,col=dataset.fluo$plastidcolor,xlab='Channel 1 peak (chlorophyll)')
+    
+  }
+
+  Res <- list('dataset.analyzed' = dataset.analyzed, 'counts' = counts, 'Ch1.peaks' = Ch1.peaks, 'Ch2.peaks' = Ch2.peaks,'Ch1.peaks.sd' = Ch1.peaks.sd, 'Ch2.peaks.sd' = Ch2.peaks.sd)
+  Res
+  
+  
+}
+```
+
+
+
+# Analyze FlowCam raw data to generate spreadsheet summarizing results
+
+This chunk loops over the specified folders to generate a spreadsheet summarizing the Mesodinium and cryptophyte abundances by plastid type and experimental conditions.
+
+```{r,fig.height=8,fig.width=8}
+#Using the previously defined Folder_list, a for loop is created to access each folder one at a time, and within those folder each sample is then accessed one at a time.
+#Each data set is being processed using the MRMC.partitioning function, which distinguished Red Chloroplast MC from blue-green Chloroplast MC. By using the meta-data stored in the file-name a new data-sheet is created with the desired data where each row is from a single sample from a single day.
+
+create_plot_meso = T #If TRUE, the partitioning will output partitioned Ch1 vs Ch2 plots -- MESODINIUM VERSION
+create_plot_prey = T #If TRUE, the partitioning will output partitioned Ch1 vs Ch2 plots -- PREY VERSION
+
+unk.part.Meso = 5.5 # unknown partition for Mesodinium
+bg.part.Meso = 4.5 # blue-green partition for Mesodinium
+unk.part.prey = 0 # unknown partition for cryptophytes
+bg.part.prey = 4.5 # blue-green partition for cryptophytes
+
+#The first for-loop is created to open the folder of the individual sampling day in the order as they were defined (usually chronologically)
+for(dir_idx in 1:length(Folder_list)){
+  
+  #The working directory is set to the folder containing one days worth of data.
+  current_folder <- paste(root_folder,"/",Folder_list[dir_idx],sep = "")
+  
+  #Recording the current experimental day
+  today <- expt.day[dir_idx]
+  
+  #here the columns to retrieve timestamp and dilution is defined.
+  dil_name <- paste("Dil.",today,sep = "")
+  time_name <- paste("TS.",today,sep = "")
+  
+  #The function list.files(current_folder), will create a list of files that are located in the folder, and by using this list of files, a new for-loop is created accessing each file consecutively.
+  for(i in 1:length(list.files(current_folder))){
+    
+    #extracting meta data from the file name
+    #Characters 1 to 7 is the Flask index
+    name_flask <- substring(list.files(current_folder)[i],
+                            first = 1,
+                            last = 7)
+    
+    #assigning flask index as a number
+    num_flask <- as.integer(substring(list.files(current_folder)[i],
+                                      first = 6,
+                                      last = 7))
+    
+    #Characters 9 to 12 is the Mesodinium pre-experiment plastid type
+    Meso_designation <- substring(list.files(current_folder)[i],
+                                  first = 9,
+                                  last = 12)
+    
+    #Characters 14 through 18 indicate the prey being fed during the experiment
+    prey_designation <- substring(list.files(current_folder)[i],
+                                  first = 14,
+                                  last = 18)
+    
+    #Character 20 is the replicate indicator
+    expt_rep <- substring(list.files(current_folder)[i],
+                          first = 20,
+                          last = 20)
+    
+    #The dilution factor is extracted from the meta-data data-sheet in the root-folder
+    flask_dil <- expt.meta[expt.meta$Flask == num_flask,
+                           names(expt.meta) == dil_name]
+    
+    #Relative time from beginning of experiment is extracted
+    flask_time <- expt.meta[expt.meta$Flask == num_flask,
+                           names(expt.meta) == time_name]
+    
+    medium <- expt.meta[expt.meta$Flask == num_flask,"Medium"]
+    
+    #The .csv file is loaded here, and extra columns are added with the additional meta-data required for the data-processing
+    file.name <- paste(current_folder,"/",list.files(current_folder)[i],sep = "")
+    
+    vec <- read.csv(file.name) %>% 
+      mutate(Flask = name_flask,
+             replicate = expt_rep,
+             Meso = Meso_designation,
+             Prey = prey_designation,
+             Day = as.numeric(substring(expt.day[dir_idx],2)))
+    
+    #Because the flow-cam keeps counting the seconds when resetting the pump, a constant is multiplied to the Elapsed time to get the correct volume aspirated. This constant however was calculated from using the 0.5 ml pump, so a new value is probably needed for the 1 ml pump.
+    Asp.vol <- (max(vec$Elapsed.Time*0.967)/60)*0.150
+    
+    #R-vector containing the raw data-set with both Mesodinium and Crypotphyte data
+    vec.raw <- vec
+    
+    Meso_filter <- vec.raw$Class == "Mesodinium"
+    
+    #Creating an R-vector that only contains the data classified as Mesodinium
+    vec <- vec.raw[Meso_filter,]
+    
+    #Creating an R-vector that only contains the data classified as Cryptophyte (or rather it only contains data that has not been classified as Meosdinium)
+    vec2 <- vec.raw[!Meso_filter,]
+    
+    #On the first sample of each experimental day, an empty spreadsheet is created for both Prey and Mesodinium. This will be populated as the for-loop iterates through each sample.
+    if(i == 1){
+      FCDP_meso <- vec
+      FCDP_prey <- vec2
+      
+      #Creating data-frame for partitioned data results
+      All.Results <- as.data.frame(1:length(list.files(current_folder)))
+      
+      colnames(All.Results) <- c("Flask")     # Columns 1-8: Metadata
+      All.Results$Day <- NaN
+      All.Results$Time <- NaN                 
+      All.Results$Dilution <- NaN             
+      All.Results$Aspirated.vol <- NaN        
+      All.Results$Meso <- NaN                 
+      All.Results$Prey <- NaN                 
+      All.Results$Replicate <- NaN            
+      All.Results$Medium <- NaN               
+      All.Results$M.Red <- NaN               # Columns 10-16; from Res$counts
+      All.Results$M.Blue <- NaN              
+      All.Results$M.Undefined <- NaN         
+      All.Results$M.Nonfluorescent <- NaN
+      All.Results$M.TotRed <- NaN
+      All.Results$M.TotBlue <- NaN
+      All.Results$TotalMeso <- NaN          
+      All.Results$M.Red.meanCh1peak <- NaN               # Columns 17-20; from Res$Ch1.peaks
+      All.Results$M.Blue.meanCh1peak <- NaN              
+      All.Results$M.Undefined.meanCh1peak <- NaN         
+      All.Results$M.Nonfluorescent.meanCh1peak <- NaN
+      All.Results$M.Red.sdCh1peak <- NaN               # Columns 21-24; from Res$Ch1.sds
+      All.Results$M.Blue.sdCh1peak <- NaN              
+      All.Results$M.Undefined.sdCh1peak <- NaN         
+      All.Results$M.Nonfluorescent.sdCh1peak <- NaN
+      All.Results$M.Red.meanCh2peak <- NaN               # Columns 25-28; from Res$Ch2.peaks
+      All.Results$M.Blue.meanCh2peak <- NaN              
+      All.Results$M.Undefined.meanCh2peak <- NaN         
+      All.Results$M.Nonfluorescent.meanCh2peak <- NaN  
+      All.Results$M.Red.sdCh2peak <- NaN               # Columns 29-32; from Res$Ch2.sds
+      All.Results$M.Blue.sdCh2peak <- NaN              
+      All.Results$M.Undefined.sdCh2peak <- NaN         
+      All.Results$M.Nonfluorescent.sdCh2peak <- NaN  
+      
+      #Adding columns for cryptophytes
+      All.Results$C.Red <- NaN               # Columns 9-15; from Res$counts
+      All.Results$C.Blue <- NaN              
+      All.Results$C.Undefined <- NaN         
+      All.Results$C.Nonfluorescent <- NaN
+      All.Results$C.TotRed <- NaN
+      All.Results$C.TotBlue <- NaN
+      All.Results$TotalCrypto <- NaN          
+      All.Results$C.Red.meanCh1peak <- NaN               # Columns 16-19; from Res$Ch1.peaks
+      All.Results$C.Blue.meanCh1peak <- NaN              
+      All.Results$C.Undefined.meanCh1peak <- NaN         
+      All.Results$C.Nonfluorescent.meanCh1peak <- NaN
+      All.Results$C.Red.sdCh1peak <- NaN               # Columns 20-23; from Res$Ch1.sds
+      All.Results$C.Blue.sdCh1peak <- NaN              
+      All.Results$C.Undefined.sdCh1peak <- NaN         
+      All.Results$C.Nonfluorescent.sdCh1peak <- NaN
+      All.Results$C.Red.meanCh2peak <- NaN               # Columns 24-27; from Res$Ch2.peaks
+      All.Results$C.Blue.meanCh2peak <- NaN              
+      All.Results$C.Undefined.meanCh2peak <- NaN         
+      All.Results$C.Nonfluorescent.meanCh2peak <- NaN  
+      All.Results$C.Red.sdCh2peak <- NaN               # Columns 28-31; from Res$Ch2.sds
+      All.Results$C.Blue.sdCh2peak <- NaN              
+      All.Results$C.Undefined.sdCh2peak <- NaN         
+      All.Results$C.Nonfluorescent.sdCh2peak <- NaN  
+      
+    } else{
+      FCDP_prey <- rbind(FCDP_prey,vec2)
+      FCDP_meso <- rbind(FCDP_meso,vec)
+    }
+    
+    # Add relevant data for this sample
+    All.Results$Flask[i] <- name_flask
+    All.Results$Day[i] <- today
+    All.Results$Time[i] <- flask_time
+    All.Results$Dilution[i] <- flask_dil
+    All.Results$Aspirated.vol[i] <- round(Asp.vol,3)
+    All.Results$Meso[i] <- Meso_designation
+    All.Results$Prey[i] <- prey_designation
+    All.Results$Replicate[i] <- expt_rep
+    All.Results$Medium[i] <- medium
+    
+    #Running the partitioning function for Mesodinium
+
+    if(dim(vec)[1] > 0){ # If there are Mesodinium in the dataset
+      Res <- Meso.flowPeaks(vec,name_flask,today,create_plot = create_plot_meso,unknown.partition = unk.part.Meso, bluegreen.partition = bg.part.Meso)
+      #Assigning partitioned data for Mesodinium
+      All.Results[i,10:16] <- Res$counts
+      All.Results[i,17:20] <- Res$Ch1.peaks
+      All.Results[i,21:24] <- Res$Ch1.peaks.sd
+      All.Results[i,25:28] <- Res$Ch2.peaks
+      All.Results[i,29:32] <- Res$Ch2.peaks.sd
+    }
+    
+    if(dim(vec2)[1] > 0){ # If there are cryptophytes in the dataset
+      #Running flowPeaks for Prey
+      Res.crypto <- Meso.flowPeaks(vec2,name_flask,today,create_plot = create_plot_prey,unknown.partition = unk.part.prey, bluegreen.partition = bg.part.prey)
+      #Assigning partitioned data for Prey
+      All.Results[i,33:39] <- Res.crypto$counts
+      All.Results[i,40:43] <- Res.crypto$Ch1.peaks
+      All.Results[i,44:47] <- Res.crypto$Ch1.peaks.sd
+      All.Results[i,48:51] <- Res.crypto$Ch2.peaks
+      All.Results[i,52:55] <- Res.crypto$Ch2.peaks.sd
+    }
+    
+    if(i == length(list.files(current_folder))){
+        FCDP_prey <- FCDP_prey %>% mutate(Partition = "Prey")
+        FCDP_meso <- FCDP_meso %>% mutate(Partition = "Mesodinium")
+        FCDP_all <- rbind(FCDP_meso,FCDP_prey)
+      
+      
+      Res_name <- paste(CSV_folder,"/Summary_",expt.day[dir_idx],".csv",sep = "")
+      FCDP_name <- paste(CSV_folder,"/FCDP_all_",expt.day[dir_idx],".csv",sep = "")
+      
+      write.csv(All.Results,Res_name,row.names = F)
+      write.csv(FCDP_all,FCDP_name,row.names = F)
+    }
+  }
+  
+  if(dir_idx == 1){
+    All.Results.Concat <- All.Results
+  } else{
+    All.Results.Concat <- rbind(All.Results.Concat, All.Results)
+  }
+  
+  if(dir_idx == length(Folder_list)){
+    All_res_name <- paste("All_Summary",".csv",sep='')
+    write.csv(All.Results.Concat,All_res_name,row.names = F)
+  }
+  
+}
+
+
+```
+
+
+# Examine experimental outcomes
+
+```{r}
+ARC <- All.Results.Concat # Shortening the variable name
+
+
+# Something strange happened with the first Aspirated Volume measurement that I don't understand. But based on the cryptophyte numbers, the volume should be more similar to the other aspiration volumes than the 0.199 that the datasheet recorded.
+ARC$Aspirated.vol[1] <- mean(ARC$Aspirated.vol[2:29])
+
+# Calculating concentrations of cells (in cells per mL), normalizing to the aspirated volume and adjusting for dilution
+ARC$M.pmL <- ARC$TotalMeso/ARC$Aspirated.vol*ARC$Dilu
+ARC$M.pmL.red <- ARC$M.TotRed/ARC$Aspirated.vol*ARC$Dilu
+ARC$M.pmL.blue <- ARC$M.TotBlue/ARC$Aspirated.vol*ARC$Dilu
+
+ARC$C.pmL <- ARC$TotalCrypto/ARC$Aspirated.vol*ARC$Dilu
+ARC$C.pmL.red <- ARC$C.TotRed/ARC$Aspirated.vol*ARC$Dilu
+ARC$C.pmL.blue <- ARC$C.TotBlue/ARC$Aspirated.vol*ARC$Dilu
+
+# Calculating proportion of blue-green cryptophytes
+ARC$C.propblue <- ARC$C.pmL.blue/ARC$C.pmL
+
+# Rounding day to whole number so that we can group by timepoint in downstream calculations
+ARC$Day.Numeric <- round(ARC$Time,digits=0)
+
+```
+
+
+Did M. rubrum eat prey? To answer this, we can look at prey dynamics over the course of the experiment.
+
+```{r}
+# Colors from Hiroshige and Cassatt2, Metbrewer, https://github.com/BlakeRMills/MetBrewer
+TAcol <- rgb(230/255,98/255,84/255)
+TAcol.bg <- rgb(230/255,98/255,84/255,.5)
+HPcol <- rgb(114/255,187/255,213/255)
+HPcol.bg <- rgb(114/255,187/255,213/255,.5)
+Bothcol <- rgb(144/255,113/255,158/255)
+Bothcol.bg <- rgb(144/255,113/255,158/255,.5)
+```
+
+
+```{r, fig.height=2.5, fig.width=3*2.5}
+par(mar=c(4,4,1,1),mfrow=c(1,3))
+
+# Panel 1: All cryptophytes
+plot(jitter(ARC$Day.Numeric,.2),ARC$C.pmL/1000,las=1,xlab='Time (days)',ylab='Cryptophytes (1000s of cells/mL)',pch=21,bg=c(Bothcol.bg,'white')[as.factor(ARC$Meso)],col=Bothcol,cex=1.5)
+legend(x='topleft',inset=c(0.03,0.03),legend=c('Control','+ M. rubrum'),pch=21,pt.cex=1.5,pt.bg=c(Bothcol,'white'))
+
+Summ.Prey <- summarySE(data=ARC, 'C.pmL', groupvars=c('Day.Numeric','Meso'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL/1000+Summ.Prey$se/1000,Summ.Prey$Day.Numeric,Summ.Prey$C.pmL/1000-Summ.Prey$se/1000,code=3,angle=90,length=.02)
+points(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL/1000,pch=21,cex=1.5,bg=c(Bothcol,'white')[as.factor(Summ.Prey$Meso)])
+
+# Panel 2: Teleaulax
+plot(jitter(ARC$Day.Numeric,.2),ARC$C.pmL.red/1000,las=1,xlab='Time (days)',ylab='T. amphioxeia (1000s of cells/mL)',pch=21,bg=c(TAcol.bg,'white')[as.factor(ARC$Meso)],col=TAcol,cex=1.5)
+legend(x='topleft',inset=c(0.03,0.03),legend=c('Control','+ M. rubrum'),pch=21,pt.cex=1.5,pt.bg=c(TAcol,'white'))
+
+Summ.Prey <- summarySE(data=ARC, 'C.pmL.red', groupvars=c('Day.Numeric','Meso'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.red/1000+Summ.Prey$se/1000,Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.red/1000-Summ.Prey$se/1000,code=3,angle=90,length=.02)
+points(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.red/1000,pch=21,cex=1.5,bg=c(TAcol,'white')[as.factor(Summ.Prey$Meso)])
+
+# Panel 3: Hemiselmis
+plot(jitter(ARC$Day.Numeric,.2),ARC$C.pmL.blue/1000,las=1,xlab='Time (days)',ylab='H. pacifica (1000s of cells/mL)',pch=21,bg=c(HPcol.bg,'white')[as.factor(ARC$Meso)],col=HPcol,cex=1.5)
+legend(x='topleft',inset=c(0.03,0.03),legend=c('Control','+ M. rubrum'),pch=21,pt.cex=1.5,pt.bg=c(HPcol,'white'))
+
+Summ.Prey <- summarySE(data=ARC, 'C.pmL.blue', groupvars=c('Day.Numeric','Meso'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.blue/1000+Summ.Prey$se/1000,Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.blue/1000-Summ.Prey$se/1000,code=3,angle=90,length=.02)
+points(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.blue/1000,pch=21,cex=1.5,bg=c(HPcol,'white')[as.factor(Summ.Prey$Meso)])
+
+```
+
+We can see that in the presence of M. rubrum, the prey are really reduced. This suggests they're being eaten by the ciliate!
+
+Did M. rubrum grow? To answer this, we can look at ciliate dynamics over the course of the experiment.
+
+```{r, fig.height=4, fig.width=4}
+par(mar=c(4,4,1,1))
+
+ARC.Meso <- ARC[ARC$Meso=='MRTA',]
+
+plot(jitter(ARC.Meso$Day.Numeric,.4),ARC.Meso$M.pmL/1000,las=1,xlab='Time (days)',ylab='M. rubrum (1000s of cells/mL)',pch=21,bg=c('white'),col='gray50',cex=1.5)
+#legend(x='topleft',inset=c(0.03,0.03),legend=c('Control','+ M. rubrum'),pch=21,pt.cex=1.5,pt.bg=c(Bothcol,'white'))
+
+Summ.Prey <- summarySE(data=ARC.Meso, 'M.pmL', groupvars=c('Day.Numeric'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$M.pmL/1000+Summ.Prey$se/1000,Summ.Prey$Day.Numeric,Summ.Prey$M.pmL/1000-Summ.Prey$se/1000,code=3,angle=90,length=.02)
+points(Summ.Prey$Day.Numeric,Summ.Prey$M.pmL/1000,pch=21,cex=1.5,bg='black')
+```
+OK, great, so we know that M. rubrum were growing (and we'll need to account for this in any calculations of grazing rate). However, without a prey-free control, we can't estimate how much the presence of prey enhanced M. rubrum's growth rate.
+
+### Preferential Grazing
+
+The real goal of this experiment, however, was to detect preferential grazing (if present).
+
+Did M. rubrum preferentially eat one prey type? If so, we'd expect the relative abundances of the prey to change over time.
+
+
+```{r, fig.height=4, fig.width=4}
+
+par(mar=c(4,4,1,1))
+
+plot(jitter(ARC$Day.Numeric,.2),ARC$C.propblue,las=1,xlab='Time (days)',ylab='Proportion H. pacifica',pch=21,bg=c(Bothcol.bg,'white')[as.factor(ARC$Meso)],col=Bothcol,cex=1.5)
+legend(x='topright',inset=c(0.03,0.03),legend=c('Control','+ M. rubrum'),pch=21,pt.cex=1.5,pt.bg=c(Bothcol,'white'))
+
+Summ.Prey <- summarySE(data=ARC, 'C.propblue', groupvars=c('Day.Numeric','Meso'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$C.propblue+Summ.Prey$se,Summ.Prey$Day.Numeric,Summ.Prey$C.propblue-Summ.Prey$se,code=3,angle=90,length=.02)
+points(Summ.Prey$Day.Numeric,Summ.Prey$C.propblue,pch=21,cex=1.5,bg=c(Bothcol,'white')[as.factor(Summ.Prey$Meso)])
+
+```
+A couple takeaways from this: First, the ratio stays the same between control and + M. rubrum treatments. This suggests that the cells are being eaten proportional to abundance, rather than with some preference for, e.g., T. amphioxeia. Second, the ratio is never 50:50, even at the start. This suggests it might be hard to get H. pacifica inoculated in the correct ratio (we might need to give it a "boost" in our inoculation calculations).
+
+Although these data suggest that M. rubrum is killing HP and TA in proportion to their abundance, this doesn't necessarily tell us that M. rubrum is retaining HP plastids when it has the choice between these plastids and TA ones. We can look at the Channel 2 fluorescence (a proxy for phycoerythrin content) to guess at this, but absent controls for M. rubrum this won't be definitive.
+
+```{r, fig.height=3, fig.width=6}
+par(mar=c(4,4,1,1),mfrow=c(1,2))
+
+Chlcol <- rgb(127/255,160/255,116/255)
+Chlcol.bg <- rgb(127/255,160/255,116/255,.5)
+ARC.Meso <- ARC[ARC$Meso=='MRTA',]
+
+plot(jitter(ARC.Meso$Day.Numeric,.4),ARC.Meso$M.Red.meanCh1peak,las=1,xlab='Time (days)',ylab='M. rubrum Ch 1 (Chlorophyll)',pch=21,bg=c('white'),col=Chlcol.bg,cex=1.5)
+#legend(x='topright',inset=c(0.03,0.03),legend=c('Channel 1 (chl-a)','Channel 2 (PE)'),pch=21,pt.cex=1.5,pt.bg=c('gray20',TAcol))
+
+Summ.Prey <- summarySE(data=ARC.Meso, 'M.Red.meanCh1peak', groupvars=c('Day.Numeric'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$M.Red.meanCh1peak+Summ.Prey$se,Summ.Prey$Day.Numeric,Summ.Prey$M.Red.meanCh1peak-Summ.Prey$se,code=3,angle=90,length=.02)
+points(Summ.Prey$Day.Numeric,Summ.Prey$M.Red.meanCh1peak,pch=21,cex=1.5,bg=Chlcol)
+
+
+
+plot(jitter(ARC.Meso$Day.Numeric,.4),ARC.Meso$M.Red.meanCh2peak,las=1,xlab='Time (days)',ylab='M. rubrum Ch 2 (Phycoerythrin)',pch=21,bg=c('white'),col=TAcol.bg,cex=1.5)
+#legend(x='topright',inset=c(0.03,0.03),legend=c('Channel 1 (chl-a)','Channel 2 (PE)'),pch=21,pt.cex=1.5,pt.bg=c('gray20',TAcol))
+
+Summ.Prey <- summarySE(data=ARC.Meso, 'M.Red.meanCh2peak', groupvars=c('Day.Numeric'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$M.Red.meanCh2peak+Summ.Prey$se,Summ.Prey$Day.Numeric,Summ.Prey$M.Red.meanCh2peak-Summ.Prey$se,code=3,angle=90,length=.02)
+points(Summ.Prey$Day.Numeric,Summ.Prey$M.Red.meanCh2peak,pch=21,cex=1.5,bg=TAcol)
+
+
+
+```
+
+### Calculating ingestion rates
+
+We'll follow Jeong & Latz 1994 and calculate ingestion rates based on the growth rates of prey in the absence and presence of predator. 
+
+To perform this calculation, we'll need estimates of the growth rates for all species in all flasks.
+
+```{r, fig.height=3,fig.width=8}
+
+par(mar=c(4,4,1,1),mfrow=c(1,3))
+summ.dat <- as.data.frame(unique(ARC$Flask))
+colnames(summ.dat) <- 'Flask'
+summ.dat$Meso <- ARC$Meso[match(summ.dat$Flask,ARC$Flask)]
+summ.dat$Prey <- ARC$Prey[match(summ.dat$Flask,ARC$Flask)]
+summ.dat$Replicate <- ARC$Replicate[match(summ.dat$Flask,ARC$Flask)]
+summ.dat$TA.mu <- NaN
+summ.dat$HP.mu <- NaN
+summ.dat$MR.mu <- NaN
+
+datewindow <- c(1:4)
+
+for(i in 1:dim(summ.dat)[1]){
+  FlaskID <- summ.dat$Flask[i]
+  subdat <- ARC[ARC$Flask==summ.dat$Flask[i],]
+  
+  # TA growth curve
+  plot(subdat$Time,subdat$C.pmL.red/1000,col=TAcol,pch=21,bg=TAcol.bg,log='y',xlab='Time (days)',ylab=expression(paste(italic('T. amphioxeia'),' (',10^3,' cells m',L^-1,')')),las=1)
+  lmTA <- lm(log(subdat$C.pmL.red)[datewindow]~subdat$Time[datewindow])
+  summ.dat$TA.mu[i] <- summary(lmTA)$coefficients[2,1]
+  xcoords <- seq(from = min(subdat$Time,na.rm = T), to = max(subdat$Time,na.rm = T), length.out=50)
+  ycoords <- exp(summary(lmTA)$coefficients[1,1])*exp(summ.dat$TA.mu[i]*xcoords)
+  lines(xcoords,ycoords/1000)
+  
+  # HP growth curve
+  plot(subdat$Time,subdat$C.pmL.blue/1000,col=HPcol,pch=21,bg=HPcol.bg,log='y',xlab='Time (days)',ylab=expression(paste(italic('H.pacifica'),' (',10^3,' cells m',L^-1,')')),las=1)
+  lmHP <- lm(log(subdat$C.pmL.blue)[datewindow]~subdat$Time[datewindow])
+  summ.dat$HP.mu[i] <- summary(lmHP)$coefficients[2,1]
+  ycoords <- exp(summary(lmHP)$coefficients[1,1])*exp(summ.dat$HP.mu[i]*xcoords)
+  lines(xcoords,ycoords/1000)
+  
+  # MR growth curve
+  if(subdat$Meso[1]=='0000'){
+    plot(1,1,type='n',bty='n',xaxt='n',yaxt='n',xlab='',ylab='')
+  } else{
+  plot(subdat$Time,subdat$M.pmL/1000,col=Bothcol,pch=21,bg=Bothcol.bg,log='y',xlab='Time (days)',ylab=expression(paste(italic('M. rubrum'),' (',10^3,' cells m',L^-1,')')),las=1)
+  lmMR <- lm(log(subdat$M.pmL)[datewindow]~subdat$Time[datewindow])
+  summ.dat$MR.mu[i] <- summary(lmMR)$coefficients[2,1]
+  ycoords <- exp(summary(lmMR)$coefficients[1,1])*exp(summ.dat$MR.mu[i]*xcoords)
+  lines(xcoords,ycoords/1000)
+  }
+  
+  
+}
+
+```
+
+Now, we'll match the prey control (predator-free) growth rates by replicate:
+
+```{r}
+summ.dat.ctrl <- summ.dat[summ.dat$Meso=='0000',]
+summ.dat$ctrl.TA.mu <- summ.dat.ctrl$TA.mu[match(summ.dat$Replicate,summ.dat.ctrl$Replicate)]
+summ.dat$ctrl.HP.mu <- summ.dat.ctrl$HP.mu[match(summ.dat$Replicate,summ.dat.ctrl$Replicate)]
+
+```
+
+The grazing rate, $g$, is the difference between the growth rate in the absence of the predator and the growth rate in the presence of the predator. It has units of per day: 
+
+```{r}
+summ.dat$g.TA <- summ.dat$ctrl.TA.mu-summ.dat$TA.mu
+summ.dat$g.HP <- summ.dat$ctrl.HP.mu-summ.dat$HP.mu
+```
+
+To determine the ingestion rate, we also need to know the mean population sizes of both predators and prey. To determine this, we first match the population sizes at the start of the experiment.
+
+```{r}
+summ.dat$TA.d0 <- ARC[ARC$Day.Numeric==0,]$C.pmL.red
+summ.dat$HP.d0 <- ARC[ARC$Day.Numeric==0,]$C.pmL.blue
+summ.dat$MR.d0 <- ARC[ARC$Day.Numeric==0,]$M.pmL
+```
+
+Next, we assume exponential growth, and solve for the mean population size:
+
+```{r}
+summ.dat$TA.pop.72 <- summ.dat$TA.d0*(exp(summ.dat$TA.mu*3)-1) / (3 * summ.dat$TA.mu)
+summ.dat$HP.pop.72 <- summ.dat$HP.d0*(exp(summ.dat$HP.mu*3)-1) / (3 * summ.dat$HP.mu)
+summ.dat$MR.pop.72 <- summ.dat$MR.d0*(exp(summ.dat$MR.mu*3)-1) / (3 * summ.dat$MR.mu)
+```
+
+Finally, we can compute the ingestion rate: the number of cryptophytes consumed per Mesodinium per day:
+
+```{r}
+summ.dat$i.TA <- summ.dat$g.TA*summ.dat$TA.pop.72/summ.dat$MR.pop.72
+summ.dat$i.HP <- summ.dat$g.HP*summ.dat$HP.pop.72/summ.dat$MR.pop.72
+```
+
+And the attack rate: the volume of water (in uL) filtered per each M. rubrum cell per day
+
+```{r}
+summ.dat$a.TA <- summ.dat$g.TA/summ.dat$MR.pop.72*1000
+summ.dat$a.HP <- summ.dat$g.HP/summ.dat$MR.pop.72*1000
+```
+
+We can perform a statistical test to see whether the attack rates differ by prey type:
+
+```{r}
+t.test(summ.dat[summ.dat$Meso=='MRTA',]$a.TA,summ.dat[summ.dat$Meso=='MRTA',]$a.HP)
+```
+
+The p-value is 0.9292, which is much greater than 0.05. This means that, according to our experimental results and within the limits of statistical power set by our design, the attack rates are not significantly different from one another.
+
+```{r,fig.height=2.5,fig.width=8.5}
+par(mar=c(4,4,1,1),mfrow=c(1,4))
+
+# Plot 1: Growth rates
+growths <- as.data.frame(cbind(rep(c('TA','HP'),each=3),c(summ.dat[summ.dat$Meso=='0000',]$TA.mu,summ.dat[summ.dat$Meso=='0000',]$HP.mu)))
+colnames(growths) <- c('Cryptophyte','GrowthRate')
+growths$GrowthRate <- as.numeric(as.character(growths$GrowthRate))
+bargraph.CI(Cryptophyte,GrowthRate,data=growths,las=1,xlab='Cryptophyte prey species',names=c(expression(paste(italic('H. pacifica'))),expression(paste(italic('T. amphioxeia')))),ylab=expression(paste('Cryptophyte growth rate (',d^-1,')')),col=c(HPcol.bg,TAcol.bg))
+# t.test(summ.dat[summ.dat$Meso=='0000',]$TA.mu,summ.dat[summ.dat$Meso=='0000',]$HP.mu) # p = 0.3728
+
+# Plot 2: Population sizes
+sizes <- as.data.frame(cbind(rep(c('TA','HP'),each=3),c(summ.dat[summ.dat$Meso=='MRTA',]$TA.pop.72,summ.dat[summ.dat$Meso=='MRTA',]$HP.pop.72)))
+colnames(sizes) <- c('Cryptophyte','PopSize')
+sizes$PopSize <- as.numeric(as.character(sizes$PopSize))
+bargraph.CI(Cryptophyte,PopSize,data=sizes,las=1,xlab='Cryptophyte prey species',names=c(expression(paste(italic('H. pacifica'))),expression(paste(italic('T. amphioxeia')))),ylab=expression(paste('Mean population size (cells ',mL^-1,')')),col=c(HPcol.bg,TAcol.bg))
+# t.test(summ.dat[summ.dat$Meso=='MRTA',]$TA.pop.72,summ.dat[summ.dat$Meso=='MRTA',]$HP.pop.72) # p = 0.003637
+text(1.3,4300,'**',cex=1.5)
+
+# Plot 3: Ingestion rates
+ingests <- as.data.frame(cbind(rep(c('TA','HP'),each=3),c(summ.dat[summ.dat$Meso=='MRTA',]$i.TA,summ.dat[summ.dat$Meso=='MRTA',]$i.HP)))
+colnames(ingests) <- c('Cryptophyte','IngestRate')
+ingests$IngestRate <- as.numeric(as.character(ingests$IngestRate))
+bargraph.CI(Cryptophyte,IngestRate,data=ingests,las=1,xlab='Cryptophyte prey species',names=c(expression(paste(italic('H. pacifica'))),expression(paste(italic('T. amphioxeia')))),ylab=expression(paste('Ingestion rate (prey ',italic('M. rubrum')^-1,' ',d^-1,')')),col=c(HPcol.bg,TAcol.bg))
+# t.test(summ.dat[summ.dat$Meso=='MRTA',]$i.TA,summ.dat[summ.dat$Meso=='MRTA',]$i.HP) # p = 0.05589
+
+# Plot 4: Attack rates
+attacks <- as.data.frame(cbind(rep(c('TA','HP'),each=3),c(summ.dat[summ.dat$Meso=='MRTA',]$a.TA,summ.dat[summ.dat$Meso=='MRTA',]$a.HP)))
+colnames(attacks) <- c('Cryptophyte','AttackRate')
+attacks$AttackRate <- as.numeric(as.character(attacks$AttackRate))
+bargraph.CI(Cryptophyte,AttackRate,data=attacks,las=1,xlab='Cryptophyte prey species',names=c(expression(paste(italic('H. pacifica'))),expression(paste(italic('T. amphioxeia')))),ylab=expression(paste('Attack rate (μL ',italic('M. rubrum')^-1,' ',d^-1,')')),col=c(HPcol.bg,TAcol.bg))
+# t.test(summ.dat[summ.dat$Meso=='MRTA',]$a.TA,summ.dat[summ.dat$Meso=='MRTA',]$a.HP) # p = 0.9292
+
+```
+
+What we can see from this graph is that (1) T. amphioxeia grows slightly faster than H. pacifica. (2) Coupled with an initially higher population density, this results in an overall higher abundance of T. amphioxeia throughout the experiment. (3) Perhaps unsurprisingly, T. amphioxeia is also ingested more frequently, with almost 3x as many T. amphioxeia cells eaten per day as H. pacifica. (4) And indeed, when we account for these differences in relative abundance, the attack rate (which is an indication of the 'effort' M. rubrum is putting into catching different prey species) winds up being very similar between the two prey types.
+
+
+
+Manuscript figure:
+
+Top row: timeseries of population sizes and ratio
+Bottom row: barplots of growth rate, mean population size, ingestion rate, and attack rate
+
+
+```{r,fig.height=6*.8,fig.width=8.5*.8}
+
+layout(matrix(data=c(1,1,2,2,3,4,5,6),nrow=2,ncol=4,byrow=T))
+par(mar=c(4,4.5,1,1))
+
+# Panel 1: Population dynamics
+axlabcex <- 0.7
+plot(jitter(ARC$Day.Numeric,.2),ARC$C.pmL.red/1000,las=1,xlab='',ylab='',pch=21,bg=c(TAcol.bg,'white')[as.factor(ARC$Meso)],col=TAcol,cex=1.5,log='y',type='n',ylim=c(1,50))
+legend(x='topleft',inset=c(0.01,0.0),legend=c(expression(paste(italic('H. pac.'),' + ',italic('M. rubrum'))),expression(paste(italic('T. amph.'),' + ',italic('M. rubrum'))),expression(paste(italic('H. pac.'),' control')),expression(paste(italic('T. amph.'),' control'))),pch=c(22,21,22,21),pt.cex=1.5,pt.bg=c('black','black','white','white'),bty='n')
+mtext(expression(paste('Cryptophyte population size')),side=2,line=3.4,cex=axlabcex)
+mtext(expression(paste('(',10^3,' cells · ',mL^-1,')')),side=2,line=2,cex=axlabcex)
+mtext('Time (d)',side=1,cex=axlabcex,line=2.3)
+
+# Add Teleaulax points
+Summ.Prey <- summarySE(data=ARC, 'C.pmL.red', groupvars=c('Day.Numeric','Meso'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.red/1000+Summ.Prey$se/1000,Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.red/1000-Summ.Prey$se/1000,code=3,angle=90,length=.02)
+lines(Summ.Prey[Summ.Prey$Meso=='0000',]$Day.Numeric,Summ.Prey[Summ.Prey$Meso=='0000',]$C.pmL.red/1000,lty=2)
+lines(Summ.Prey[Summ.Prey$Meso=='MRTA',]$Day.Numeric,Summ.Prey[Summ.Prey$Meso=='MRTA',]$C.pmL.red/1000,lty=1)
+points(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.red/1000,pch=21,cex=1.5,bg=c('white','black')[as.factor(Summ.Prey$Meso)])
+
+# Add Hemiselmis points
+Summ.Prey <- summarySE(data=ARC, 'C.pmL.blue', groupvars=c('Day.Numeric','Meso'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.blue/1000+Summ.Prey$se/1000,Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.blue/1000-Summ.Prey$se/1000,code=3,angle=90,length=.02)
+lines(Summ.Prey[Summ.Prey$Meso=='0000',]$Day.Numeric,Summ.Prey[Summ.Prey$Meso=='0000',]$C.pmL.blue/1000,lty=2)
+lines(Summ.Prey[Summ.Prey$Meso=='MRTA',]$Day.Numeric,Summ.Prey[Summ.Prey$Meso=='MRTA',]$C.pmL.blue/1000,lty=1)
+points(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.blue/1000,pch=22,cex=1.5,bg=c('white','black')[as.factor(Summ.Prey$Meso)])
+
+
+# Panel 2: Ratio
+Bothcol.bg <- 'gray50'
+Bothcol <- 'black'
+plot(jitter(ARC$Day.Numeric,.2),ARC$C.propblue,las=1,xlab='',ylab=expression(paste('Proportion ',italic('H. pacifica'))),pch=21,bg=c(Bothcol.bg,'white')[as.factor(ARC$Meso)],col=Bothcol,cex=1.5,type='n')
+legend(x='topright',inset=c(0.03,0.03),legend=c(expression(paste('+ ',italic('M. rubrum'))),'Control'),pch=21,pt.cex=1.5,pt.bg=c(Bothcol,'white'))
+mtext('Time (d)',side=1,cex=axlabcex,line=2.3)
+
+Summ.Prey <- summarySE(data=ARC, 'C.propblue', groupvars=c('Day.Numeric','Meso'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$C.propblue+Summ.Prey$se,Summ.Prey$Day.Numeric,Summ.Prey$C.propblue-Summ.Prey$se,code=3,angle=90,length=.02)
+lines(Summ.Prey[Summ.Prey$Meso=='0000',]$Day.Numeric,Summ.Prey[Summ.Prey$Meso=='0000',]$C.propblue,lty=2)
+lines(Summ.Prey[Summ.Prey$Meso=='MRTA',]$Day.Numeric,Summ.Prey[Summ.Prey$Meso=='MRTA',]$C.propblue,lty=1)
+points(Summ.Prey$Day.Numeric,Summ.Prey$C.propblue,pch=21,cex=1.5,bg=c('white','black')[as.factor(Summ.Prey$Meso)])
+
+
+
+
+# Row 2: barplots
+names2use <- c(expression(paste(italic('H. pac.'))),expression(paste(italic('T. amph.'))))
+par(mar=c(6,4,1,1))
+HPcol.bg <- 'gray70'
+TAcol.bg <- 'white'
+
+# Plot 1: Growth rates
+growths <- as.data.frame(cbind(rep(c('TA','HP'),each=3),c(summ.dat[summ.dat$Meso=='0000',]$TA.mu,summ.dat[summ.dat$Meso=='0000',]$HP.mu)))
+colnames(growths) <- c('Cryptophyte','GrowthRate')
+growths$GrowthRate <- as.numeric(as.character(growths$GrowthRate))
+bargraph.CI(Cryptophyte,GrowthRate,data=growths,las=1,xlab='',names=names2use,ylab='',col=c(HPcol.bg,TAcol.bg),space=0.1,ylim=c(0,.825))
+# t.test(summ.dat[summ.dat$Meso=='0000',]$TA.mu,summ.dat[summ.dat$Meso=='0000',]$HP.mu) # p = 0.3728
+mtext(expression(paste('Cryptophyte growth rate (',d^-1,')')),side=2,line=2.5,cex=axlabcex)
+
+# Plot 2: Population sizes
+sizes <- as.data.frame(cbind(rep(c('TA','HP'),each=3),c(summ.dat[summ.dat$Meso=='MRTA',]$TA.pop.72,summ.dat[summ.dat$Meso=='MRTA',]$HP.pop.72)))
+colnames(sizes) <- c('Cryptophyte','PopSize')
+sizes$PopSize <- as.numeric(as.character(sizes$PopSize))
+bargraph.CI(Cryptophyte,PopSize,data=sizes,las=1,xlab='',names=names2use,ylab='',col=c(HPcol.bg,TAcol.bg),space=.1,ylim=c(0,4500))
+# t.test(summ.dat[summ.dat$Meso=='MRTA',]$TA.pop.72,summ.dat[summ.dat$Meso=='MRTA',]$HP.pop.72) # p = 0.003637
+text(1.15,4400,'**',cex=1.5)
+mtext('Cryptophyte prey species',side=1,line=2.3,cex = axlabcex,at=3)
+mtext(expression(paste('Mean popn. size (cells · ',mL^-1,')')),side=2,line=3,cex=axlabcex)
+
+# Plot 3: Ingestion rates
+ingests <- as.data.frame(cbind(rep(c('TA','HP'),each=3),c(summ.dat[summ.dat$Meso=='MRTA',]$i.TA,summ.dat[summ.dat$Meso=='MRTA',]$i.HP)))
+colnames(ingests) <- c('Cryptophyte','IngestRate')
+ingests$IngestRate <- as.numeric(as.character(ingests$IngestRate))
+bargraph.CI(Cryptophyte,IngestRate,data=ingests,las=1,xlab='',names=names2use,ylab='',col=c(HPcol.bg,TAcol.bg),space=.1,ylim=c(0,1.75))
+# t.test(summ.dat[summ.dat$Meso=='MRTA',]$i.TA,summ.dat[summ.dat$Meso=='MRTA',]$i.HP) # p = 0.05589
+mtext(expression(paste('Ingestion (prey · ',italic('M. rub.')^-1,' · ',d^-1,')')),side=2,line=2.5,cex=axlabcex)
+
+# Plot 4: Attack rates
+attacks <- as.data.frame(cbind(rep(c('TA','HP'),each=3),c(summ.dat[summ.dat$Meso=='MRTA',]$a.TA,summ.dat[summ.dat$Meso=='MRTA',]$a.HP)))
+colnames(attacks) <- c('Cryptophyte','AttackRate')
+attacks$AttackRate <- as.numeric(as.character(attacks$AttackRate))
+bargraph.CI(Cryptophyte,AttackRate,data=attacks,las=1,xlab='',names=names2use,ylab='',col=c(HPcol.bg,TAcol.bg),space=.1,ylim=c(0,.45))
+mtext(expression(paste('Attack rate (μL · ',italic('M. rub.')^-1,' · ',d^-1,')')),side=2,line=2.5,cex=axlabcex)
+# t.test(summ.dat[summ.dat$Meso=='MRTA',]$a.TA,summ.dat[summ.dat$Meso=='MRTA',]$a.HP) # p = 0.9292
+
+```
+
+
+
+
+
