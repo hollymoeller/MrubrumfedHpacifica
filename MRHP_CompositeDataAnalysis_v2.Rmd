@@ -1,0 +1,3741 @@
+---
+title: "MR fed HP Data Analysis"
+author: "Holly V. Moeller"
+date: "2024-05-11"
+output: html_document
+---
+
+# Setup
+
+## Optional commands
+```{r}
+# rm(list = ls()) # clear the environment
+
+```
+
+## Loading packages:
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+
+package.list <- c("dplyr","ggplot2","stringr","pracma",
+                  "Rmisc","tidyr","cowplot",
+                  "lemon",'flowPeaks',"sciplot",'ggExtra')
+
+if(!all(package.list %in% installed.packages()[,"Package"])){
+  install.packages(package.list[!(package.list %in% installed.packages()[,"Package"])])
+}
+
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(pracma)
+library(Rmisc)
+library(tidyr)
+library(cowplot)
+library(lemon)
+library(flowPeaks)
+library(sciplot)
+library(ggExtra)
+```
+
+## Loading special functions:
+The Meso.flowPeaks function is a wrapper for flowPeaks that tailors its use to FlowCam data with Mesodinium and cryptophytes. The function takes a subset of data with just one organism type (either Mesodinium or cryptophytes) and partitions it using the k-means algorithm in flowPeaks. It then uses breakpoints (that can be set by the user, or which are automated) to identify the plastid colours associated with each cluster identified by flowPeaks.
+
+The function outputs an annotated dataset as well as summary statistics.
+```{r}
+Meso.flowPeaks <- function(dataset,flask,day,create_plot = F,unknown.partition = 5.5, bluegreen.partition = 4.5){
+  
+  # Function last updated: 21 November 2023
+  
+  # Function inputs:
+  #  dataset = csv file from the FlowCam
+  #  flask = ID number for the flask
+  #  day = experimental day
+  #  create_plot argument (T = makes plots, F = automatic setting; doesn't make plots)
+  #  unknown.partition = channel 1 partition for "unknown" cell types. Default is at 5.5
+  #  bluegreen.partition = channel 2 partition for bluegreen plastids. Default is at 4.5
+  
+  
+  # Step 1: Partition dataset to just fluorescent particles
+  dataset.fluo <- dataset[dataset$Ch1.Peak>0,]
+  dataset.fluo <- dataset.fluo[dataset.fluo$Ch2.Peak>0,]
+  
+  # Step 2: Use flowPeaks package to fit and visualize the number of clusters of points
+  invisible(capture.output(fp <- suppressMessages(flowPeaks(dataset.fluo[,c("Ch1.Peak",'Ch2.Peak')],tol=.1,h0=.4))))
+      # The "capture.output" function captures the printed output of the flowPeaks function
+      # The "invisible" function suppresses that output so it doesn't automatically print.
+      # The "suppressMessages" function suppresses the messages output of flowPeaks
+
+  # Step 3: Extract cluster assignments
+  dataset.fluo$peak <- fp$peaks.cluster
+
+  # Step 4: Assign clusters to colors (or unknown)
+  fp.data <- as.data.frame(summary(fp))
+  fp.data$plastid.color <- 'red' # Presume plastids are red in color
+  for(i in 1:dim(fp.data)[1]){
+    if(fp.data$Ch1.Peak.center[i] < unknown.partition){ # If they fall below the unknown threshold, assign them "black" color for unknown
+      fp.data$plastid.color[i] <- 'black'
+    } else{ #If not unknown, then assign them "blue" color for bluegreen plastid type
+    if(fp.data$Ch2.Peak.center[i] < bluegreen.partition){
+      fp.data$plastid.color[i] <- 'blue'
+    }
+  }}
+  dataset.fluo$peak.Ch1 <- fp.data$Ch1.Peak.center[match(dataset.fluo$peak,fp.data$cluster.id)]
+  dataset.fluo$peak.Ch2 <- fp.data$Ch2.Peak.center[match(dataset.fluo$peak,fp.data$cluster.id)]
+  dataset.fluo$plastidcolor <- fp.data$plastid.color[match(dataset.fluo$peak,fp.data$cluster.id)]
+  
+  # Step 5: Map fluorescent data back onto the dataset for export.
+  dataset.analyzed <- dataset
+  dataset.analyzed$plastidcolor <- dataset.fluo$plastidcolor[match(dataset.analyzed$Capture.ID,dataset.fluo$Capture.ID)]
+  if(dim(dataset.analyzed[is.na(dataset.analyzed$plastidcolor),])[1]>0){
+  dataset.analyzed[is.na(dataset.analyzed$plastidcolor),]$plastidcolor <- 'nonfluorescent'}
+  dataset.analyzed$plastidcolor <- factor(dataset.analyzed$plastidcolor,levels=c('red','blue','black','nonfluorescent'))
+  
+  # Step 6: Calculate summary statistics
+  counts <- as.data.frame(t(as.matrix(table(dataset.analyzed$plastidcolor))))
+  counts$tot.red <- counts$red + (counts$black + counts$nonfluorescent)*counts$red/(counts$red+counts$blue)
+  counts$tot.blue <- counts$blue + (counts$black + counts$nonfluorescent)*counts$blue/(counts$red+counts$blue)
+  counts$tot.meso <- counts$tot.blue+counts$tot.red
+  Ch1.peaks <- as.data.frame(t(as.matrix(tapply(dataset.analyzed$Ch1.Peak,dataset.analyzed$plastidcolor,FUN=mean))))
+  Ch2.peaks <- as.data.frame(t(as.matrix(tapply(dataset.analyzed$Ch2.Peak,dataset.analyzed$plastidcolor,FUN=mean))))
+  Ch1.peaks.sd <- as.data.frame(t(as.matrix(tapply(dataset.analyzed$Ch1.Peak,dataset.analyzed$plastidcolor,FUN=sd))))
+  Ch2.peaks.sd <- as.data.frame(t(as.matrix(tapply(dataset.analyzed$Ch2.Peak,dataset.analyzed$plastidcolor,FUN=sd))))
+  
+  # Step 7: Make plots if desired
+  if(create_plot==T){
+    
+    # 1. Baseline plot of all data
+    par(mfrow=c(2,2))
+    par(mar=c(2,4,2.5,0.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,ylab='Channel 2 peak (phycoerythrin)')
+    text(min(dataset.fluo$Ch1.Peak),max(dataset.fluo$Ch2.Peak),dataset.fluo$Class[1],pos=4)
+    text(min(dataset.fluo$Ch1.Peak),max(dataset.fluo$Ch2.Peak)-.15,paste(flask,', Day ',day),pos=4)
+    
+    # 2. Plot of flowpeaks package partitions
+    par(mar=c(2,2,2.5,2.5))
+    plot(fp)
+    
+    # 3. Plot of data with cluster assignments
+    par(mar=c(4,4,.5,.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,col=c('red','blue','cyan','green')[as.factor(dataset.fluo$peak)],xlab='Channel 1 peak (chlorophyll)',ylab='Channel 2 peak (phycoerythrin)')
+    
+    # 4. Plot of data assigned by plastid type
+    par(mar=c(4,2,.5,2.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,col=dataset.fluo$plastidcolor,xlab='Channel 1 peak (chlorophyll)')
+    
+  }
+
+  Res <- list('dataset.analyzed' = dataset.analyzed, 'counts' = counts, 'Ch1.peaks' = Ch1.peaks, 'Ch2.peaks' = Ch2.peaks,'Ch1.peaks.sd' = Ch1.peaks.sd, 'Ch2.peaks.sd' = Ch2.peaks.sd)
+  Res
+  
+  
+}
+```
+
+Transparency for color ramps: https://github.com/mylesmharrison/colorRampPaletteAlpha/blob/master/colorRampPaletteAlpha.R
+```{r}
+# addalpha()
+addalpha <- function(colors, alpha=1.0) {
+  r <- col2rgb(colors, alpha=T)
+  # Apply alpha
+  r[4,] <- alpha*255
+  r <- r/255.0
+  return(rgb(r[1,], r[2,], r[3,], r[4,]))
+}
+
+# colorRampPaletteAlpha()
+colorRampPaletteAlpha <- function(colors, n=32, interpolate='linear') {
+  # Create the color ramp normally
+  cr <- colorRampPalette(colors, interpolate=interpolate)(n)
+  # Find the alpha channel
+  a <- col2rgb(colors, alpha=T)[4,]
+  # Interpolate
+	if (interpolate=='linear') {
+		l <- approx(a, n=n)
+	} else {
+		l <- spline(a, n=n)
+	}
+	l$y[l$y > 255] <- 255 # Clamp if spline is > 255
+	cr <- addalpha(cr, l$y/255.0)
+	return(cr)
+}
+```
+
+
+## Setting up plotting commands:
+```{r}
+# Colors from Hiroshige and Cassatt2, Metbrewer, https://github.com/BlakeRMills/MetBrewer
+TAcol <- rgb(230/255,98/255,84/255)
+TAcol.bg <- rgb(230/255,98/255,84/255,.5)
+HPcol <- rgb(114/255,187/255,213/255)
+HPcol.bg <- rgb(114/255,187/255,213/255,.5)
+Bothcol <- rgb(144/255,113/255,158/255)
+Bothcol.bg <- rgb(144/255,113/255,158/255,.5)
+
+Chlcol <- rgb(127/255,160/255,116/255)
+Chlcol.bg <- rgb(127/255,160/255,116/255,.5)
+
+HPcols <- c('white',HPcol)
+HPcols.bg <- c('white',HPcol.bg)
+TAcols <- c('white',TAcol)
+TAcols.bg <- c('white',TAcol.bg)
+Chlcols <- c('white',Chlcol)
+Chlcols.bg <- c('white',Chlcol.bg)
+
+# Color ramps
+#TAto00cols2 <- colorRampPalette(c('indianred3','gray90'))
+#TAto00cols2 <- colorRampPalette(c(TAcol,'goldenrod'))
+#TAto00colset2 <- addalpha(TAto00cols2(length(expt.day)),.5)
+
+#TAtoHPcols2 <- colorRampPalette(c('indianred3','gray90','paleturquoise4'))
+TAtoHPcols2 <- colorRampPalette(c(TAcol,'gray90',HPcol))
+```
+
+
+## Loading datasets:
+```{r}
+
+```
+
+
+# Supplement: FlowCam - Confocal calibration
+
+### Setup FlowCam file structure
+```{r}
+#Input the location of your main folder for the current experiment.
+root_folder <- "/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/FlowCam/DataFiles"
+
+#In the main folder create a folder name CSV_files, if named other wise change "/CSV_files" accordingly
+CSV_folder <- paste(root_folder,"/CSV_files",sep = "")
+
+#List the sub-folders of the current experiment, this would usually be one folder for each sampling day.
+Folder_list <- c("D1","D3","D6","D9","D12","D15","D17","D19")
+
+expt.day <- Folder_list
+
+knitr::opts_knit$set(root.dir = root_folder)
+
+#A .csv file should be created with extra meta-data, such as data for sampling time and dilution. If other data is acquired, such as pigment extractions, include these in the this file as well.
+expt.meta <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/FlowCam/Mrubrum_fedHP_FunctionalResponseCurves - Calib_DilTime.csv")
+
+calib.counts <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Mrubrum_fedHP_FunctionalResponseCurves - Calib_Counts.csv",header=T)
+
+```
+
+### Analyze FlowCam raw data to generate spreadsheet summarizing results
+
+This chunk loops over the specified folders to generate a spreadsheet summarizing the Mesodinium and cryptophyte abundances by plastid type and experimental conditions.
+
+```{r,fig.height=8,fig.width=8}
+#Using the previously defined Folder_list, a for loop is created to access each folder one at a time, and within those folder each sample is then accessed one at a time.
+#Each data set is being processed using the MRMC.partitioning function, which distinguished Red Chloroplast MC from blue-green Chloroplast MC. By using the meta-data stored in the file-name a new data-sheet is created with the desired data where each row is from a single sample from a single day.
+
+create_plot_meso = F #If TRUE, the partitioning will output partitioned Ch1 vs Ch2 plots -- MESODINIUM VERSION
+create_plot_prey = F #If TRUE, the partitioning will output partitioned Ch1 vs Ch2 plots -- PREY VERSION
+
+unk.part.Meso = 5.5 # unknown partition for Mesodinium
+bg.part.Meso = 4.5 # blue-green partition for Mesodinium
+unk.part.prey = 0 # unknown partition for cryptophytes
+bg.part.prey = 4.5 # blue-green partition for cryptophytes
+
+#The first for-loop is created to open the folder of the individual sampling day in the order as they were defined (usually chronologically)
+for(dir_idx in 1:length(Folder_list)){
+  
+  #The working directory is set to the folder containing one days worth of data.
+  current_folder <- paste(root_folder,"/",Folder_list[dir_idx],sep = "")
+  
+  #Recording the current experimental day
+  today <- expt.day[dir_idx]
+  
+  #here the columns to retrieve timestamp and dilution is defined.
+  dil_name <- paste("Dil.",today,sep = "")
+  time_name <- paste("TS.",today,sep = "")
+  
+  #The function list.files(current_folder), will create a list of files that are located in the folder, and by using this list of files, a new for-loop is created accessing each file consecutively.
+  for(i in 1:length(list.files(current_folder))){
+    
+    #extracting meta data from the file name
+    #Characters 1 to 7 is the Flask index
+    name_flask <- substring(list.files(current_folder)[i],
+                            first = 1,
+                            last = 7)
+    
+    #assigning flask index as a number
+    num_flask <- as.integer(substring(list.files(current_folder)[i],
+                                      first = 6,
+                                      last = 7))
+    
+    #Characters 9 to 12 is the Mesodinium pre-experiment plastid type
+    Meso_designation <- substring(list.files(current_folder)[i],
+                                  first = 9,
+                                  last = 12)
+    
+    #Characters 14 through 15 indicate the prey being fed during the experiment
+    prey_designation <- substring(list.files(current_folder)[i],
+                                  first = 14,
+                                  last = 15)
+    
+    #Character 20 is the replicate indicator
+    expt_rep <- substring(list.files(current_folder)[i],
+                          first = 20,
+                          last = 20)
+    
+    #The dilution factor is extracted from the meta-data data-sheet in the root-folder
+    flask_dil <- expt.meta[expt.meta$Flask == num_flask,
+                           names(expt.meta) == dil_name]
+    
+    #Relative time from beginning of experiment is extracted
+    flask_time <- expt.meta[expt.meta$Flask == num_flask,
+                           names(expt.meta) == time_name]
+    
+    medium <- expt.meta[expt.meta$Flask == num_flask,"Medium"]
+    
+    #The .csv file is loaded here, and extra columns are added with the additional meta-data required for the data-processing
+    file.name <- paste(current_folder,"/",list.files(current_folder)[i],sep = "")
+    
+    vec <- read.csv(file.name) %>% 
+      mutate(Flask = name_flask,
+             replicate = expt_rep,
+             Meso = Meso_designation,
+             Prey = prey_designation,
+             Day = as.numeric(substring(expt.day[dir_idx],2)))
+    
+    #Because the flow-cam keeps counting the seconds when resetting the pump, a constant is multiplied to the Elapsed time to get the correct volume aspirated. This constant however was calculated from using the 0.5 ml pump, so a new value is probably needed for the 1 ml pump.
+    Asp.vol <- (max(vec$Elapsed.Time*0.967)/60)*0.150
+    
+    #R-vector containing the raw data-set with both Mesodinium and Crypotphyte data
+    vec.raw <- vec
+    
+    Meso_filter <- vec.raw$Class == "Mesodinium"
+    
+    #Creating an R-vector that only contains the data classified as Mesodinium
+    vec <- vec.raw[Meso_filter,]
+    
+    #Creating an R-vector that only contains the data classified as Cryptophyte (or rather it only contains data that has not been classified as Meosdinium)
+    vec2 <- vec.raw[!Meso_filter,]
+    
+    #On the first sample of each experimental day, an empty spreadsheet is created for both Prey and Mesodinium. This will be populated as the for-loop iterates through each sample.
+    if(i == 1){
+      FCDP_meso <- vec
+      FCDP_prey <- vec2
+      
+      #Creating data-frame for partitioned data results
+      All.Results <- as.data.frame(1:length(list.files(current_folder)))
+      
+      colnames(All.Results) <- c("Flask")     # Columns 1-8: Metadata
+      All.Results$Day <- NaN
+      All.Results$Time <- NaN                 
+      All.Results$Dilution <- NaN             
+      All.Results$Aspirated.vol <- NaN        
+      All.Results$Meso <- NaN                 
+      All.Results$Prey <- NaN                 
+      All.Results$Replicate <- NaN            
+      All.Results$Medium <- NaN               
+      All.Results$M.Red <- NaN               # Columns 10-16; from Res$counts
+      All.Results$M.Blue <- NaN              
+      All.Results$M.Undefined <- NaN         
+      All.Results$M.Nonfluorescent <- NaN
+      All.Results$M.TotRed <- NaN
+      All.Results$M.TotBlue <- NaN
+      All.Results$TotalMeso <- NaN          
+      All.Results$M.Red.meanCh1peak <- NaN               # Columns 17-20; from Res$Ch1.peaks
+      All.Results$M.Blue.meanCh1peak <- NaN              
+      All.Results$M.Undefined.meanCh1peak <- NaN         
+      All.Results$M.Nonfluorescent.meanCh1peak <- NaN
+      All.Results$M.Red.sdCh1peak <- NaN               # Columns 21-24; from Res$Ch1.sds
+      All.Results$M.Blue.sdCh1peak <- NaN              
+      All.Results$M.Undefined.sdCh1peak <- NaN         
+      All.Results$M.Nonfluorescent.sdCh1peak <- NaN
+      All.Results$M.Red.meanCh2peak <- NaN               # Columns 25-28; from Res$Ch2.peaks
+      All.Results$M.Blue.meanCh2peak <- NaN              
+      All.Results$M.Undefined.meanCh2peak <- NaN         
+      All.Results$M.Nonfluorescent.meanCh2peak <- NaN  
+      All.Results$M.Red.sdCh2peak <- NaN               # Columns 29-32; from Res$Ch2.sds
+      All.Results$M.Blue.sdCh2peak <- NaN              
+      All.Results$M.Undefined.sdCh2peak <- NaN         
+      All.Results$M.Nonfluorescent.sdCh2peak <- NaN  
+      
+      #Adding columns for cryptophytes
+      All.Results$C.Red <- NaN               # Columns 9-15; from Res$counts
+      All.Results$C.Blue <- NaN              
+      All.Results$C.Undefined <- NaN         
+      All.Results$C.Nonfluorescent <- NaN
+      All.Results$C.TotRed <- NaN
+      All.Results$C.TotBlue <- NaN
+      All.Results$TotalCrypto <- NaN          
+      All.Results$C.Red.meanCh1peak <- NaN               # Columns 16-19; from Res$Ch1.peaks
+      All.Results$C.Blue.meanCh1peak <- NaN              
+      All.Results$C.Undefined.meanCh1peak <- NaN         
+      All.Results$C.Nonfluorescent.meanCh1peak <- NaN
+      All.Results$C.Red.sdCh1peak <- NaN               # Columns 20-23; from Res$Ch1.sds
+      All.Results$C.Blue.sdCh1peak <- NaN              
+      All.Results$C.Undefined.sdCh1peak <- NaN         
+      All.Results$C.Nonfluorescent.sdCh1peak <- NaN
+      All.Results$C.Red.meanCh2peak <- NaN               # Columns 24-27; from Res$Ch2.peaks
+      All.Results$C.Blue.meanCh2peak <- NaN              
+      All.Results$C.Undefined.meanCh2peak <- NaN         
+      All.Results$C.Nonfluorescent.meanCh2peak <- NaN  
+      All.Results$C.Red.sdCh2peak <- NaN               # Columns 28-31; from Res$Ch2.sds
+      All.Results$C.Blue.sdCh2peak <- NaN              
+      All.Results$C.Undefined.sdCh2peak <- NaN         
+      All.Results$C.Nonfluorescent.sdCh2peak <- NaN  
+      
+    } else{
+      FCDP_prey <- rbind(FCDP_prey,vec2)
+      FCDP_meso <- rbind(FCDP_meso,vec)
+    }
+    
+    # Add relevant data for this sample
+    All.Results$Flask[i] <- name_flask
+    All.Results$Day[i] <- today
+    All.Results$Time[i] <- flask_time
+    All.Results$Dilution[i] <- flask_dil
+    All.Results$Aspirated.vol[i] <- round(Asp.vol,3)
+    All.Results$Meso[i] <- Meso_designation
+    All.Results$Prey[i] <- prey_designation
+    All.Results$Replicate[i] <- expt_rep
+    All.Results$Medium[i] <- medium
+    
+    #Running the partitioning function for Mesodinium
+
+    if(dim(vec)[1] > 0){ # If there are Mesodinium in the dataset
+      Res <- Meso.flowPeaks(vec,name_flask,today,create_plot = create_plot_meso,unknown.partition = unk.part.Meso, bluegreen.partition = bg.part.Meso)
+      #Assigning partitioned data for Mesodinium
+      All.Results[i,10:16] <- Res$counts
+      All.Results[i,17:20] <- Res$Ch1.peaks
+      All.Results[i,21:24] <- Res$Ch1.peaks.sd
+      All.Results[i,25:28] <- Res$Ch2.peaks
+      All.Results[i,29:32] <- Res$Ch2.peaks.sd
+    }
+    
+    if(dim(vec2)[1] > 0){ # If there are cryptophytes in the dataset
+      #Running flowPeaks for Prey
+      Res.crypto <- Meso.flowPeaks(vec2,name_flask,today,create_plot = create_plot_prey,unknown.partition = unk.part.prey, bluegreen.partition = bg.part.prey)
+      #Assigning partitioned data for Prey
+      All.Results[i,33:39] <- Res.crypto$counts
+      All.Results[i,40:43] <- Res.crypto$Ch1.peaks
+      All.Results[i,44:47] <- Res.crypto$Ch1.peaks.sd
+      All.Results[i,48:51] <- Res.crypto$Ch2.peaks
+      All.Results[i,52:55] <- Res.crypto$Ch2.peaks.sd
+    }
+    
+    if(i == length(list.files(current_folder))){
+        FCDP_prey <- FCDP_prey %>% mutate(Partition = "Prey")
+        FCDP_meso <- FCDP_meso %>% mutate(Partition = "Mesodinium")
+        FCDP_all <- rbind(FCDP_meso,FCDP_prey)
+      
+      
+      Res_name <- paste(CSV_folder,"/Summary_",expt.day[dir_idx],".csv",sep = "")
+      FCDP_name <- paste(CSV_folder,"/FCDP_all_",expt.day[dir_idx],".csv",sep = "")
+      
+      write.csv(All.Results,Res_name,row.names = F)
+      write.csv(FCDP_all,FCDP_name,row.names = F)
+    }
+  }
+  
+  if(dir_idx == 1){
+    All.Results.Concat <- All.Results
+  } else{
+    All.Results.Concat <- rbind(All.Results.Concat, All.Results)
+  }
+  
+  if(dir_idx == length(Folder_list)){
+    All_res_name <- paste("All_Summary",".csv",sep='')
+    write.csv(All.Results.Concat,All_res_name,row.names = F)
+  }
+  
+}
+
+```
+
+Next, we concatenate the relevant data into a single spreadsheet, and filter to make sure we are only using data from Mesodinium cells that had a fluorescent signal.
+
+```{r}
+# Concatenate FlowCam data
+FCDP_name <- paste(CSV_folder,"/FCDP_all_",expt.day[1],".csv",sep = "")
+FCDP <- read.csv(FCDP_name)
+FCDP.Meso.00 <- FCDP[FCDP$Class=='Mesodinium' & FCDP$Prey=='00',]
+FCDP.Meso.HP <- FCDP[FCDP$Class=='Mesodinium' & FCDP$Prey=='HP',]
+FCDP.Meso.TA <- FCDP[FCDP$Class=='Mesodinium' & FCDP$Prey=='TA',]
+
+for(i in 2:length(expt.day)){
+  FCDP_name <- paste(CSV_folder,"/FCDP_all_",expt.day[i],".csv",sep = "")
+  FCDP <- read.csv(FCDP_name)
+  FCDP.Meso.00 <- rbind(FCDP.Meso.00,FCDP[FCDP$Class=='Mesodinium' & FCDP$Prey=='00',])
+  FCDP.Meso.HP <- rbind(FCDP.Meso.HP,FCDP[FCDP$Class=='Mesodinium' & FCDP$Prey=='HP',])
+  FCDP.Meso.TA <- rbind(FCDP.Meso.TA,FCDP[FCDP$Class=='Mesodinium' & FCDP$Prey=='TA',])
+}
+
+# Extract just fluorescent Mesodinium cells
+# Step 1: Partition dataset to just fluorescent particles
+dataset.fluo <- FCDP.Meso.HP[FCDP.Meso.HP$Ch1.Peak>0,]
+dataset.fluo <- dataset.fluo[dataset.fluo$Ch2.Peak>0,]
+  
+# Step 2: Use flowPeaks package to fit and visualize the number of clusters of points
+invisible(capture.output(fp <- suppressMessages(flowPeaks(dataset.fluo[,c("Ch1.Peak",'Ch2.Peak')],tol=.1,h0=.4))))
+
+# Step 3: Extract cluster assignments
+dataset.fluo$peak <- fp$peaks.cluster
+
+# Step 4: Assign clusters to colors (or unknown)
+fp.data <- as.data.frame(summary(fp))
+fp.data$plastid.color <- 'red' # Presume plastids are red in color
+for(i in 1:dim(fp.data)[1]){
+  if(fp.data$Ch1.Peak.center[i] < unk.part.Meso){ # If they fall below the unknown threshold, assign them "black" color for unknown
+    fp.data$plastid.color[i] <- 'black'
+  } else{ #If not unknown, then assign them "blue" color for bluegreen plastid type
+  if(fp.data$Ch2.Peak.center[i] < bg.part.Meso){
+    fp.data$plastid.color[i] <- 'blue'
+  }
+}}
+dataset.fluo$peak.Ch1 <- fp.data$Ch1.Peak.center[match(dataset.fluo$peak,fp.data$cluster.id)]
+dataset.fluo$peak.Ch2 <- fp.data$Ch2.Peak.center[match(dataset.fluo$peak,fp.data$cluster.id)]
+dataset.fluo$plastidcolor <- fp.data$plastid.color[match(dataset.fluo$peak,fp.data$cluster.id)]
+  
+# Step 5: Map fluorescent data back onto the dataset for export.
+dataset.analyzed <- FCDP.Meso.HP
+dataset.analyzed$plastidcolor <- dataset.fluo$plastidcolor[match(dataset.analyzed$Capture.ID,dataset.fluo$Capture.ID)]
+if(dim(dataset.analyzed[is.na(dataset.analyzed$plastidcolor),])[1]>0){
+dataset.analyzed[is.na(dataset.analyzed$plastidcolor),]$plastidcolor <- 'nonfluorescent'}
+dataset.analyzed$plastidcolor <- factor(dataset.analyzed$plastidcolor,levels=c('red','blue','black','nonfluorescent'))
+  
+# 1. Baseline plot of all data
+    par(mfrow=c(2,2))
+    par(mar=c(2,4,2.5,0.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,ylab='Channel 2 peak (phycoerythrin)')
+    
+    # 2. Plot of flowpeaks package partitions
+    par(mar=c(2,2,2.5,2.5))
+    plot(fp)
+    
+    # 3. Plot of data with cluster assignments
+    par(mar=c(4,4,.5,.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,col=c('red','blue','cyan','green')[as.factor(dataset.fluo$peak)],xlab='Channel 1 peak (chlorophyll)',ylab='Channel 2 peak (phycoerythrin)')
+    
+    # 4. Plot of data assigned by plastid type
+    par(mar=c(4,2,.5,2.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,col=dataset.fluo$plastidcolor,xlab='Channel 1 peak (chlorophyll)')
+
+FCDP.Meso.HP.hasplastid <- dataset.fluo[dataset.fluo$plastidcolor!='black',]
+
+
+# Extract just fluorescent Mesodinium cells
+# Step 1: Partition dataset to just fluorescent particles
+dataset.fluo <- FCDP.Meso.00[FCDP.Meso.00$Ch1.Peak>0,]
+dataset.fluo <- dataset.fluo[dataset.fluo$Ch2.Peak>0,]
+  
+# Step 2: Use flowPeaks package to fit and visualize the number of clusters of points
+invisible(capture.output(fp <- suppressMessages(flowPeaks(dataset.fluo[,c("Ch1.Peak",'Ch2.Peak')],tol=.1,h0=.4))))
+
+# Step 3: Extract cluster assignments
+dataset.fluo$peak <- fp$peaks.cluster
+
+# Step 4: Assign clusters to colors (or unknown)
+fp.data <- as.data.frame(summary(fp))
+fp.data$plastid.color <- 'red' # Presume plastids are red in color
+for(i in 1:dim(fp.data)[1]){
+  if(fp.data$Ch1.Peak.center[i] < unk.part.Meso){ # If they fall below the unknown threshold, assign them "black" color for unknown
+    fp.data$plastid.color[i] <- 'black'
+  } else{ #If not unknown, then assign them "blue" color for bluegreen plastid type
+  if(fp.data$Ch2.Peak.center[i] < bg.part.Meso){
+    fp.data$plastid.color[i] <- 'blue'
+  }
+}}
+dataset.fluo$peak.Ch1 <- fp.data$Ch1.Peak.center[match(dataset.fluo$peak,fp.data$cluster.id)]
+dataset.fluo$peak.Ch2 <- fp.data$Ch2.Peak.center[match(dataset.fluo$peak,fp.data$cluster.id)]
+dataset.fluo$plastidcolor <- fp.data$plastid.color[match(dataset.fluo$peak,fp.data$cluster.id)]
+  
+# Step 5: Map fluorescent data back onto the dataset for export.
+dataset.analyzed <- FCDP.Meso.00
+dataset.analyzed$plastidcolor <- dataset.fluo$plastidcolor[match(dataset.analyzed$Capture.ID,dataset.fluo$Capture.ID)]
+if(dim(dataset.analyzed[is.na(dataset.analyzed$plastidcolor),])[1]>0){
+dataset.analyzed[is.na(dataset.analyzed$plastidcolor),]$plastidcolor <- 'nonfluorescent'}
+dataset.analyzed$plastidcolor <- factor(dataset.analyzed$plastidcolor,levels=c('red','blue','black','nonfluorescent'))
+  
+# 1. Baseline plot of all data
+    par(mfrow=c(2,2))
+    par(mar=c(2,4,2.5,0.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,ylab='Channel 2 peak (phycoerythrin)')
+    
+    # 2. Plot of flowpeaks package partitions
+    par(mar=c(2,2,2.5,2.5))
+    plot(fp)
+    
+    # 3. Plot of data with cluster assignments
+    par(mar=c(4,4,.5,.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,col=c('red','blue','cyan','green')[as.factor(dataset.fluo$peak)],xlab='Channel 1 peak (chlorophyll)',ylab='Channel 2 peak (phycoerythrin)')
+    
+    # 4. Plot of data assigned by plastid type
+    par(mar=c(4,2,.5,2.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,col=dataset.fluo$plastidcolor,xlab='Channel 1 peak (chlorophyll)')
+
+FCDP.Meso.00.hasplastid <- dataset.fluo[dataset.fluo$plastidcolor!='black',]
+
+# Extract just fluorescent Mesodinium cells
+# Step 1: Partition dataset to just fluorescent particles
+dataset.fluo <- FCDP.Meso.TA[FCDP.Meso.TA$Ch1.Peak>0,]
+dataset.fluo <- dataset.fluo[dataset.fluo$Ch2.Peak>0,]
+  
+# Step 2: Use flowPeaks package to fit and visualize the number of clusters of points
+invisible(capture.output(fp <- suppressMessages(flowPeaks(dataset.fluo[,c("Ch1.Peak",'Ch2.Peak')],tol=.1,h0=.4))))
+
+# Step 3: Extract cluster assignments
+dataset.fluo$peak <- fp$peaks.cluster
+
+# Step 4: Assign clusters to colors (or unknown)
+fp.data <- as.data.frame(summary(fp))
+fp.data$plastid.color <- 'red' # Presume plastids are red in color
+for(i in 1:dim(fp.data)[1]){
+  if(fp.data$Ch1.Peak.center[i] < unk.part.Meso){ # If they fall below the unknown threshold, assign them "black" color for unknown
+    fp.data$plastid.color[i] <- 'black'
+  } else{ #If not unknown, then assign them "blue" color for bluegreen plastid type
+  if(fp.data$Ch2.Peak.center[i] < bg.part.Meso){
+    fp.data$plastid.color[i] <- 'blue'
+  }
+}}
+dataset.fluo$peak.Ch1 <- fp.data$Ch1.Peak.center[match(dataset.fluo$peak,fp.data$cluster.id)]
+dataset.fluo$peak.Ch2 <- fp.data$Ch2.Peak.center[match(dataset.fluo$peak,fp.data$cluster.id)]
+dataset.fluo$plastidcolor <- fp.data$plastid.color[match(dataset.fluo$peak,fp.data$cluster.id)]
+  
+# Step 5: Map fluorescent data back onto the dataset for export.
+dataset.analyzed <- FCDP.Meso.TA
+dataset.analyzed$plastidcolor <- dataset.fluo$plastidcolor[match(dataset.analyzed$Capture.ID,dataset.fluo$Capture.ID)]
+if(dim(dataset.analyzed[is.na(dataset.analyzed$plastidcolor),])[1]>0){
+dataset.analyzed[is.na(dataset.analyzed$plastidcolor),]$plastidcolor <- 'nonfluorescent'}
+dataset.analyzed$plastidcolor <- factor(dataset.analyzed$plastidcolor,levels=c('red','blue','black','nonfluorescent'))
+  
+# 1. Baseline plot of all data
+    par(mfrow=c(2,2))
+    par(mar=c(2,4,2.5,0.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,ylab='Channel 2 peak (phycoerythrin)')
+    
+    # 2. Plot of flowpeaks package partitions
+    par(mar=c(2,2,2.5,2.5))
+    plot(fp)
+    
+    # 3. Plot of data with cluster assignments
+    par(mar=c(4,4,.5,.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,col=c('red','blue','cyan','green')[as.factor(dataset.fluo$peak)],xlab='Channel 1 peak (chlorophyll)',ylab='Channel 2 peak (phycoerythrin)')
+    
+    # 4. Plot of data assigned by plastid type
+    par(mar=c(4,2,.5,2.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,col=dataset.fluo$plastidcolor,xlab='Channel 1 peak (chlorophyll)')
+
+FCDP.Meso.TA.hasplastid <- dataset.fluo[dataset.fluo$plastidcolor!='black',]
+```
+
+### Import and concatenate Confocal data
+```{r}
+# Day 01
+F01D01 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F01_D01_StarvedA_Data_processeddata.csv"); F01D01$Rep <- "A"
+F03D01 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F03_D01_StarvedB_Data_processeddata.csv"); F03D01$Rep <- "B"
+F05D01 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F05_D01_StarvedC_Data_processeddata.csv"); F05D01$Rep <- "C"
+StarvedD01 <- rbind(F01D01,F03D01,F05D01)
+colnames(StarvedD01) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+F02D01 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F02_D01_HPFedA_Data_processeddata.csv"); F02D01$Rep <- "A"
+F04D01 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F04_D01_HPFedB_Data_processeddata.csv"); F04D01$Rep <- "B"
+F06D01 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F06_D01_HPFedC_Data_processeddata.csv"); F06D01$Rep <- "C"
+HPFedD01 <- rbind(F02D01,F04D01,F06D01)
+colnames(HPFedD01) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+# Day 03
+F01D03 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F01_D03_StarvedA_Data_processeddata.csv"); F01D03$Rep <- "A"
+F03D03 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F03_D03_StarvedB_Data_processeddata.csv"); F03D03$Rep <- "B"
+F05D03 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F05_D03_StarvedC_Data_processeddata.csv"); F05D03$Rep <- "C"
+StarvedD03 <- rbind(F01D03,F03D03,F05D03)
+colnames(StarvedD03) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+F02D03 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F02_D03_HPFedA_Data_processeddata.csv"); F02D03$Rep <- "A"
+F04D03 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F04_D03_HPFedB_Data_processeddata.csv"); F04D03$Rep <- "B"
+F06D03 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F06_D03_HPFedC_Data_processeddata.csv"); F06D03$Rep <- "C"
+HPFedD03 <- rbind(F02D03,F04D03,F06D03)
+colnames(HPFedD03) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+# Day 06
+F01D06 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F01_D06_StarvedA_Data_processeddata.csv"); F01D06$Rep <- "A"
+F03D06 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F03_D06_StarvedB_Data_processeddata.csv"); F03D06$Rep <- "B"
+F05D06 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F05_D06_StarvedC_Data_processeddata.csv"); F05D06$Rep <- "C"
+StarvedD06 <- rbind(F01D06,F03D06,F05D06)
+colnames(StarvedD06) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+F02D06 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F02_D06_HPFedA_Data_processeddata.csv"); F02D06$Rep <- "A"
+F04D06 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F04_D06_HPFedB_Data_processeddata.csv"); F04D06$Rep <- "B"
+F06D06 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F06_D06_HPFedC_Data_processeddata.csv"); F06D06$Rep <- "C"
+HPFedD06 <- rbind(F02D06,F04D06,F06D06)
+colnames(HPFedD06) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+# Day 09
+F01D09 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F01_D09_StarvedA_Data_processeddata.csv"); F01D09$Rep <- "A"
+F03D09 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F03_D09_StarvedB_Data_processeddata.csv"); F03D09$Rep <- "B"
+F05D09 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F05_D09_StarvedC_Data_processeddata.csv"); F05D09$Rep <- "C"
+StarvedD09 <- rbind(F01D09,F03D09,F05D09)
+colnames(StarvedD09) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+F02D09 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F02_D09_HPFedA_Data_processeddata.csv"); F02D09$Rep <- "A"
+F04D09 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F04_D09_HPFedB_Data_processeddata.csv"); F04D09$Rep <- "B"
+F06D09 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F06_D09_HPFedC_Data_processeddata.csv"); F06D09$Rep <- "C"
+HPFedD09 <- rbind(F02D09,F04D09,F06D09)
+colnames(HPFedD09) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+# Day 12
+F01D12 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F01_D12_StarvedA_Data_processeddata.csv"); F01D12$Rep <- "A"
+F03D12 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F03_D12_StarvedB_Data_processeddata.csv"); F03D12$Rep <- "B"
+F05D12 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F05_D12_StarvedC_Data_processeddata.csv"); F05D12$Rep <- "C"
+StarvedD12 <- rbind(F01D12,F03D12,F05D12)
+colnames(StarvedD12) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+F02D12 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F02_D12_HPFedA_Data_processeddata.csv"); F02D12$Rep <- "A"
+F04D12 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F04_D12_HPFedB_Data_processeddata.csv"); F04D12$Rep <- "B"
+F06D12 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F06_D12_HPFedC_Data_processeddata.csv"); F06D12$Rep <- "C"
+HPFedD12 <- rbind(F02D12,F04D12,F06D12)
+colnames(HPFedD12) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+# Day 15
+F01D15 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F01_D15_StarvedA_Data_processeddata.csv"); F01D15$Rep <- "A"
+F03D15 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F03_D15_StarvedB_Data_processeddata.csv"); F03D15$Rep <- "B"
+F05D15 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F05_D15_StarvedC_Data_processeddata.csv"); F05D15$Rep <- "C"
+StarvedD15 <- rbind(F01D15,F03D15,F05D15)
+colnames(StarvedD15) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+F02D15 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F02_D15_HPFedA_Data_processeddata.csv"); F02D15$Rep <- "A"
+F04D15 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F04_D15_HPFedB_Data_processeddata.csv"); F04D15$Rep <- "B"
+F06D15 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F06_D15_HPFedC_Data_processeddata.csv"); F06D15$Rep <- "C"
+HPFedD15 <- rbind(F02D15,F04D15,F06D15)
+colnames(HPFedD15) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+# Day 17
+F07D17 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F07_D17_MR+HP+0_A_Data_processeddata.csv"); F07D17$Rep <- "A"
+F08D17 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F08_D17_MR+HP+0_B_Data_processeddata.csv"); F08D17$Rep <- "B"
+F09D17 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F09_D17_MR+HP+0_C_Data_processeddata.csv"); F09D17$Rep <- "C"
+StarvedD17 <- rbind(F07D17,F08D17,F09D17)
+colnames(StarvedD17) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+F10D17 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F10_D17_MR+HP+TA_A_Data_processeddata.csv"); F10D17$Rep <- "A"
+F11D17 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F11_D17_MR+HP+TA_B_Data_processeddata.csv"); F11D17$Rep <- "B"
+F12D17 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F12_D17_MR+HP+TA_C_Data_processeddata.csv"); F12D17$Rep <- "C"
+TAFedD17 <- rbind(F10D17,F11D17,F12D17)
+colnames(TAFedD17) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+# Day 19
+F07D19 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F07_D19_MR+HP+0_A_Data_processeddata.csv"); F07D19$Rep <- "A"
+F08D19 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F08_D19_MR+HP+0_B_Data_processeddata.csv"); F08D19$Rep <- "B"
+F09D19 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F09_D19_MR+HP+0_C_Data_processeddata.csv"); F09D19$Rep <- "C"
+StarvedD19 <- rbind(F07D19,F08D19,F09D19)
+colnames(StarvedD19) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+
+F10D19 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F10_D19_MR+HP+TA_A_Data_processeddata.csv"); F10D19$Rep <- "A"
+F11D19 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F11_D19_MR+HP+TA_B_Data_processeddata.csv"); F11D19$Rep <- "B"
+F12D19 <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/FlowCamCalibration/Confocal/CSVs/F12_D19_MR+HP+TA_C_Data_processeddata.csv"); F12D19$Rep <- "C"
+TAFedD19 <- rbind(F10D19,F11D19,F12D19)
+colnames(TAFedD19) <- c("StackID","Pixels","PropDAPI","PropPE","PropPC","Rep")
+```
+
+### Combine FlowCam and Confocal data into the same data frame
+```{r}
+comparative.data <- as.data.frame(cbind(rep(expt.day,each=2),c(rep(c("00","HP"),6),rep(c("00","TA"),2))))
+colnames(comparative.data) <- c('Expt.Day','Prey')
+comparative.data$Expt.Day <- factor(comparative.data$Expt.Day,levels=expt.day)
+comparative.data$Flowcam.chl.mean <- NaN
+comparative.data$Flowcam.chl.sd <- NaN
+comparative.data$Flowcam.pe.mean <- NaN
+comparative.data$Flowcam.pe.sd <- NaN
+comparative.data$Confocal.chl.mean <- NaN
+comparative.data$Confocal.chl.sd <- NaN
+comparative.data$Confocal.pe.mean <- NaN
+comparative.data$Confocal.pe.sd <- NaN
+
+expt.day2 <- c(1,3,6,9,12,15,17,19)
+for(i in 1:6){
+  daychoice = expt.day[i]
+  # 00 treatment
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='00',]$Flowcam.chl.mean <- mean(FCDP.Meso.00.hasplastid[FCDP.Meso.00.hasplastid$Day==expt.day2[i],]$Ch1.Peak)
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='00',]$Flowcam.chl.sd <- sd(FCDP.Meso.00.hasplastid[FCDP.Meso.00.hasplastid$Day==expt.day2[i],]$Ch1.Peak)
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='00',]$Flowcam.pe.mean <- mean(FCDP.Meso.00.hasplastid[FCDP.Meso.00.hasplastid$Day==expt.day2[i],]$Ch2.Peak)
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='00',]$Flowcam.pe.sd <- sd(FCDP.Meso.00.hasplastid[FCDP.Meso.00.hasplastid$Day==expt.day2[i],]$Ch2.Peak)
+  
+  # HP treatment
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='HP',]$Flowcam.chl.mean <- mean(FCDP.Meso.HP.hasplastid[FCDP.Meso.HP.hasplastid$Day==expt.day2[i],]$Ch1.Peak)
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='HP',]$Flowcam.chl.sd <- sd(FCDP.Meso.HP.hasplastid[FCDP.Meso.HP.hasplastid$Day==expt.day2[i],]$Ch1.Peak)
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='HP',]$Flowcam.pe.mean <- mean(FCDP.Meso.HP.hasplastid[FCDP.Meso.HP.hasplastid$Day==expt.day2[i],]$Ch2.Peak)
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='HP',]$Flowcam.pe.sd <- sd(FCDP.Meso.HP.hasplastid[FCDP.Meso.HP.hasplastid$Day==expt.day2[i],]$Ch2.Peak)
+
+}
+
+for(i in 7:8){
+  daychoice = expt.day[i]
+  # 00 treatment
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='00',]$Flowcam.chl.mean <- mean(FCDP.Meso.00.hasplastid[FCDP.Meso.00.hasplastid$Day==expt.day2[i],]$Ch1.Peak)
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='00',]$Flowcam.chl.sd <- sd(FCDP.Meso.00.hasplastid[FCDP.Meso.00.hasplastid$Day==expt.day2[i],]$Ch1.Peak)
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='00',]$Flowcam.pe.mean <- mean(FCDP.Meso.00.hasplastid[FCDP.Meso.00.hasplastid$Day==expt.day2[i],]$Ch2.Peak)
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='00',]$Flowcam.pe.sd <- sd(FCDP.Meso.00.hasplastid[FCDP.Meso.00.hasplastid$Day==expt.day2[i],]$Ch2.Peak)
+  
+  # TA treatment
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='TA',]$Flowcam.chl.mean <- mean(FCDP.Meso.TA.hasplastid[FCDP.Meso.TA.hasplastid$Day==expt.day2[i],]$Ch1.Peak)
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='TA',]$Flowcam.chl.sd <- sd(FCDP.Meso.TA.hasplastid[FCDP.Meso.TA.hasplastid$Day==expt.day2[i],]$Ch1.Peak)
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='TA',]$Flowcam.pe.mean <- mean(FCDP.Meso.TA.hasplastid[FCDP.Meso.TA.hasplastid$Day==expt.day2[i],]$Ch2.Peak)
+  comparative.data[comparative.data$Expt.Day==daychoice&comparative.data$Prey=='TA',]$Flowcam.pe.sd <- sd(FCDP.Meso.TA.hasplastid[FCDP.Meso.TA.hasplastid$Day==expt.day2[i],]$Ch2.Peak)
+
+}
+
+comparative.data[comparative.data$Expt.Day=='D1'&comparative.data$Prey=='00',]$Confocal.chl.mean <- mean(StarvedD01$PropPC+StarvedD01$PropPE)
+comparative.data[comparative.data$Expt.Day=='D1'&comparative.data$Prey=='00',]$Confocal.chl.sd <- sd(StarvedD01$PropPC+StarvedD01$PropPE)
+comparative.data[comparative.data$Expt.Day=='D3'&comparative.data$Prey=='00',]$Confocal.chl.mean <- mean(StarvedD03$PropPC+StarvedD03$PropPE)
+comparative.data[comparative.data$Expt.Day=='D3'&comparative.data$Prey=='00',]$Confocal.chl.sd <- sd(StarvedD03$PropPC+StarvedD03$PropPE)
+comparative.data[comparative.data$Expt.Day=='D6'&comparative.data$Prey=='00',]$Confocal.chl.mean <- mean(StarvedD06$PropPC+StarvedD06$PropPE)
+comparative.data[comparative.data$Expt.Day=='D6'&comparative.data$Prey=='00',]$Confocal.chl.sd <- sd(StarvedD06$PropPC+StarvedD06$PropPE)
+comparative.data[comparative.data$Expt.Day=='D9'&comparative.data$Prey=='00',]$Confocal.chl.mean <- mean(StarvedD09$PropPC+StarvedD09$PropPE)
+comparative.data[comparative.data$Expt.Day=='D9'&comparative.data$Prey=='00',]$Confocal.chl.sd <- sd(StarvedD09$PropPC+StarvedD09$PropPE)
+comparative.data[comparative.data$Expt.Day=='D12'&comparative.data$Prey=='00',]$Confocal.chl.mean <- mean(StarvedD12$PropPC+StarvedD12$PropPE)
+comparative.data[comparative.data$Expt.Day=='D12'&comparative.data$Prey=='00',]$Confocal.chl.sd <- sd(StarvedD12$PropPC+StarvedD12$PropPE)
+comparative.data[comparative.data$Expt.Day=='D15'&comparative.data$Prey=='00',]$Confocal.chl.mean <- mean(StarvedD15$PropPC+StarvedD15$PropPE)
+comparative.data[comparative.data$Expt.Day=='D15'&comparative.data$Prey=='00',]$Confocal.chl.sd <- sd(StarvedD15$PropPC+StarvedD15$PropPE)
+comparative.data[comparative.data$Expt.Day=='D17'&comparative.data$Prey=='00',]$Confocal.chl.mean <- mean(StarvedD17$PropPC+StarvedD17$PropPE)
+comparative.data[comparative.data$Expt.Day=='D17'&comparative.data$Prey=='00',]$Confocal.chl.sd <- sd(StarvedD17$PropPC+StarvedD17$PropPE)
+comparative.data[comparative.data$Expt.Day=='D19'&comparative.data$Prey=='00',]$Confocal.chl.mean <- mean(StarvedD19$PropPC+StarvedD19$PropPE)
+comparative.data[comparative.data$Expt.Day=='D19'&comparative.data$Prey=='00',]$Confocal.chl.sd <- sd(StarvedD19$PropPC+StarvedD19$PropPE)
+
+comparative.data[comparative.data$Expt.Day=='D1'&comparative.data$Prey=='HP',]$Confocal.chl.mean <- mean(HPFedD01$PropPC+HPFedD01$PropPE)
+comparative.data[comparative.data$Expt.Day=='D1'&comparative.data$Prey=='HP',]$Confocal.chl.sd <- sd(HPFedD01$PropPC+HPFedD01$PropPE)
+comparative.data[comparative.data$Expt.Day=='D3'&comparative.data$Prey=='HP',]$Confocal.chl.mean <- mean(HPFedD03$PropPC+HPFedD03$PropPE)
+comparative.data[comparative.data$Expt.Day=='D3'&comparative.data$Prey=='HP',]$Confocal.chl.sd <- sd(HPFedD03$PropPC+HPFedD03$PropPE)
+comparative.data[comparative.data$Expt.Day=='D6'&comparative.data$Prey=='HP',]$Confocal.chl.mean <- mean(HPFedD06$PropPC+HPFedD06$PropPE)
+comparative.data[comparative.data$Expt.Day=='D6'&comparative.data$Prey=='HP',]$Confocal.chl.sd <- sd(HPFedD06$PropPC+HPFedD06$PropPE)
+comparative.data[comparative.data$Expt.Day=='D9'&comparative.data$Prey=='HP',]$Confocal.chl.mean <- mean(HPFedD09$PropPC+HPFedD09$PropPE)
+comparative.data[comparative.data$Expt.Day=='D9'&comparative.data$Prey=='HP',]$Confocal.chl.sd <- sd(HPFedD09$PropPC+HPFedD09$PropPE)
+comparative.data[comparative.data$Expt.Day=='D12'&comparative.data$Prey=='HP',]$Confocal.chl.mean <- mean(HPFedD12$PropPC+HPFedD12$PropPE)
+comparative.data[comparative.data$Expt.Day=='D12'&comparative.data$Prey=='HP',]$Confocal.chl.sd <- sd(HPFedD12$PropPC+HPFedD12$PropPE)
+comparative.data[comparative.data$Expt.Day=='D15'&comparative.data$Prey=='HP',]$Confocal.chl.mean <- mean(HPFedD15$PropPC+HPFedD15$PropPE)
+comparative.data[comparative.data$Expt.Day=='D15'&comparative.data$Prey=='HP',]$Confocal.chl.sd <- sd(HPFedD15$PropPC+HPFedD15$PropPE)
+
+comparative.data[comparative.data$Expt.Day=='D17'&comparative.data$Prey=='TA',]$Confocal.chl.mean <- mean(TAFedD17$PropPC+TAFedD17$PropPE)
+comparative.data[comparative.data$Expt.Day=='D17'&comparative.data$Prey=='TA',]$Confocal.chl.sd <- sd(TAFedD17$PropPC+TAFedD17$PropPE)
+comparative.data[comparative.data$Expt.Day=='D19'&comparative.data$Prey=='TA',]$Confocal.chl.mean <- mean(TAFedD19$PropPC+TAFedD19$PropPE)
+comparative.data[comparative.data$Expt.Day=='D19'&comparative.data$Prey=='TA',]$Confocal.chl.sd <- sd(TAFedD19$PropPC+TAFedD19$PropPE)
+
+
+comparative.data[comparative.data$Expt.Day=='D1'&comparative.data$Prey=='00',]$Confocal.pe.mean <- mean(StarvedD01$PropPE)
+comparative.data[comparative.data$Expt.Day=='D1'&comparative.data$Prey=='00',]$Confocal.pe.sd <- sd(StarvedD01$PropPE)
+comparative.data[comparative.data$Expt.Day=='D3'&comparative.data$Prey=='00',]$Confocal.pe.mean <- mean(StarvedD03$PropPE)
+comparative.data[comparative.data$Expt.Day=='D3'&comparative.data$Prey=='00',]$Confocal.pe.sd <- sd(StarvedD03$PropPE)
+comparative.data[comparative.data$Expt.Day=='D6'&comparative.data$Prey=='00',]$Confocal.pe.mean <- mean(StarvedD06$PropPE)
+comparative.data[comparative.data$Expt.Day=='D6'&comparative.data$Prey=='00',]$Confocal.pe.sd <- sd(StarvedD06$PropPE)
+comparative.data[comparative.data$Expt.Day=='D9'&comparative.data$Prey=='00',]$Confocal.pe.mean <- mean(StarvedD09$PropPE)
+comparative.data[comparative.data$Expt.Day=='D9'&comparative.data$Prey=='00',]$Confocal.pe.sd <- sd(StarvedD09$PropPE)
+comparative.data[comparative.data$Expt.Day=='D12'&comparative.data$Prey=='00',]$Confocal.pe.mean <- mean(StarvedD12$PropPE)
+comparative.data[comparative.data$Expt.Day=='D12'&comparative.data$Prey=='00',]$Confocal.pe.sd <- sd(StarvedD12$PropPE)
+comparative.data[comparative.data$Expt.Day=='D15'&comparative.data$Prey=='00',]$Confocal.pe.mean <- mean(StarvedD15$PropPE)
+comparative.data[comparative.data$Expt.Day=='D15'&comparative.data$Prey=='00',]$Confocal.pe.sd <- sd(StarvedD15$PropPE)
+comparative.data[comparative.data$Expt.Day=='D17'&comparative.data$Prey=='00',]$Confocal.pe.mean <- mean(StarvedD17$PropPE)
+comparative.data[comparative.data$Expt.Day=='D17'&comparative.data$Prey=='00',]$Confocal.pe.sd <- sd(StarvedD17$PropPE)
+comparative.data[comparative.data$Expt.Day=='D19'&comparative.data$Prey=='00',]$Confocal.pe.mean <- mean(StarvedD19$PropPE)
+comparative.data[comparative.data$Expt.Day=='D19'&comparative.data$Prey=='00',]$Confocal.pe.sd <- sd(StarvedD19$PropPE)
+
+comparative.data[comparative.data$Expt.Day=='D1'&comparative.data$Prey=='HP',]$Confocal.pe.mean <- mean(HPFedD01$PropPE)
+comparative.data[comparative.data$Expt.Day=='D1'&comparative.data$Prey=='HP',]$Confocal.pe.sd <- sd(HPFedD01$PropPE)
+comparative.data[comparative.data$Expt.Day=='D3'&comparative.data$Prey=='HP',]$Confocal.pe.mean <- mean(HPFedD03$PropPE)
+comparative.data[comparative.data$Expt.Day=='D3'&comparative.data$Prey=='HP',]$Confocal.pe.sd <- sd(HPFedD03$PropPE)
+comparative.data[comparative.data$Expt.Day=='D6'&comparative.data$Prey=='HP',]$Confocal.pe.mean <- mean(HPFedD06$PropPE)
+comparative.data[comparative.data$Expt.Day=='D6'&comparative.data$Prey=='HP',]$Confocal.pe.sd <- sd(HPFedD06$PropPE)
+comparative.data[comparative.data$Expt.Day=='D9'&comparative.data$Prey=='HP',]$Confocal.pe.mean <- mean(HPFedD09$PropPE)
+comparative.data[comparative.data$Expt.Day=='D9'&comparative.data$Prey=='HP',]$Confocal.pe.sd <- sd(HPFedD09$PropPE)
+comparative.data[comparative.data$Expt.Day=='D12'&comparative.data$Prey=='HP',]$Confocal.pe.mean <- mean(HPFedD12$PropPE)
+comparative.data[comparative.data$Expt.Day=='D12'&comparative.data$Prey=='HP',]$Confocal.pe.sd <- sd(HPFedD12$PropPE)
+comparative.data[comparative.data$Expt.Day=='D15'&comparative.data$Prey=='HP',]$Confocal.pe.mean <- mean(HPFedD15$PropPE)
+comparative.data[comparative.data$Expt.Day=='D15'&comparative.data$Prey=='HP',]$Confocal.pe.sd <- sd(HPFedD15$PropPE)
+
+comparative.data[comparative.data$Expt.Day=='D17'&comparative.data$Prey=='TA',]$Confocal.pe.mean <- mean(TAFedD17$PropPE)
+comparative.data[comparative.data$Expt.Day=='D17'&comparative.data$Prey=='TA',]$Confocal.pe.sd <- sd(TAFedD17$PropPE)
+comparative.data[comparative.data$Expt.Day=='D19'&comparative.data$Prey=='TA',]$Confocal.pe.mean <- mean(TAFedD19$PropPE)
+comparative.data[comparative.data$Expt.Day=='D19'&comparative.data$Prey=='TA',]$Confocal.pe.sd <- sd(TAFedD19$PropPE)
+
+comparative.data$Confocal.pc.mean <- comparative.data$Confocal.chl.mean-comparative.data$Confocal.pe.mean
+```
+
+### Determine correlations between measures
+```{r SUPPFIG 1,fig.height=4,fig.width=8,warning=F}
+
+par(mar=c(4,4,1,1),mfrow=c(1,2))
+TAtoHPcolset2 <- addalpha(TAtoHPcols2(length(expt.day)),.5)
+
+## Plot One: Chlorophyll
+# Base plot
+plot(comparative.data$Confocal.chl.mean,comparative.data$Flowcam.chl.mean,xlab='Confocal chlorophyll proportion volume',ylab='FlowCam channel 1 peak',xlim=c(min(comparative.data$Confocal.chl.mean-comparative.data$Confocal.chl.sd,na.rm=T),max(comparative.data$Confocal.chl.mean+comparative.data$Confocal.chl.sd,na.rm=T)),ylim=c(min(comparative.data$Flowcam.chl.mean-comparative.data$Flowcam.chl.sd,na.rm=T),max(comparative.data$Flowcam.chl.mean+comparative.data$Flowcam.chl.sd,na.rm=T)),type='n',las=1)
+
+# Error bars
+arrows(comparative.data$Confocal.chl.mean,comparative.data$Flowcam.chl.mean+comparative.data$Flowcam.chl.sd,comparative.data$Confocal.chl.mean,comparative.data$Flowcam.chl.mean-comparative.data$Flowcam.chl.sd,length=0.05,angle=90,code=3,col='gray50')
+arrows(comparative.data$Confocal.chl.mean-comparative.data$Confocal.chl.sd,comparative.data$Flowcam.chl.mean,comparative.data$Confocal.chl.mean+comparative.data$Confocal.chl.sd,comparative.data$Flowcam.chl.mean,length=0.05,angle=90,code=3,col='gray50')
+
+# Linear models
+lm1 <- lm(Flowcam.chl.mean~Confocal.chl.mean, data=comparative.data[comparative.data$Prey=='HP',])
+abline(lm1,lty=2)
+lm1 <- lm(Flowcam.chl.mean~Confocal.chl.mean, data=comparative.data[comparative.data$Prey!='HP',])
+abline(lm1,lty=1)
+
+# Points
+points(comparative.data$Confocal.chl.mean,comparative.data$Flowcam.chl.mean,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)])
+points(comparative.data$Confocal.chl.mean,comparative.data$Flowcam.chl.mean,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)])
+points(comparative.data$Confocal.chl.mean,comparative.data$Flowcam.chl.mean,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)])
+
+legend(x='bottomright',inset=c(0.01,0.01),legend=c('PE plastids only','Mixed plastids'),pt.cex=c(0,0),lwd=1,lty=c(1,2))
+
+
+## Plot two: phycoerythrin
+# Base plot
+plot(comparative.data$Confocal.pe.mean,comparative.data$Flowcam.pe.mean,xlab='Confocal phycoerythrin proportion volume',ylab='FlowCam channel 2 peak',xlim=c(min(comparative.data$Confocal.pe.mean-comparative.data$Confocal.pe.sd,na.rm=T),max(comparative.data$Confocal.pe.mean+comparative.data$Confocal.pe.sd,na.rm=T)),ylim=c(min(comparative.data$Flowcam.pe.mean-comparative.data$Flowcam.pe.sd,na.rm=T),max(comparative.data$Flowcam.pe.mean+comparative.data$Flowcam.pe.sd,na.rm=T)),type='n',las=1)
+
+# Error bars
+arrows(comparative.data$Confocal.pe.mean,comparative.data$Flowcam.pe.mean+comparative.data$Flowcam.pe.sd,comparative.data$Confocal.pe.mean,comparative.data$Flowcam.pe.mean-comparative.data$Flowcam.pe.sd,length=0.05,angle=90,code=3,col='gray50')
+arrows(comparative.data$Confocal.pe.mean-comparative.data$Confocal.pe.sd,comparative.data$Flowcam.pe.mean,comparative.data$Confocal.pe.mean+comparative.data$Confocal.pe.sd,comparative.data$Flowcam.pe.mean,length=0.05,angle=90,code=3,col='gray50')
+
+# Linear model
+lm1 <- lm(Flowcam.pe.mean~Confocal.pe.mean, data=comparative.data)
+abline(lm1,lty=3,lwd=1.5)
+summary(lm1)
+
+# Log model
+nls1 <- nls(Flowcam.pe.mean~a*log(Confocal.pe.mean)+b, data = comparative.data, start=list(a=1,b=1))
+xset <- seq(from=min(comparative.data$Confocal.pe.mean,na.rm=T)-1,to=max(comparative.data$Confocal.pe.mean,na.rm=T)+1,length.out=100)
+yset <- summary(nls1)$parameters[1,1]*log(xset) + summary(nls1)$parameters[2,1]
+lines(xset,yset,lty=2,lwd=1.5)
+summary(nls1)
+
+# Sqrt model
+nls1 <- nls(Flowcam.pe.mean~a*sqrt(Confocal.pe.mean)+b, data = comparative.data, start=list(a=1,b=1))
+xset <- seq(from=min(comparative.data$Confocal.pe.mean,na.rm=T)-1,to=max(comparative.data$Confocal.pe.mean,na.rm=T)+1,length.out=100)
+yset <- summary(nls1)$parameters[1,1]*sqrt(xset) + summary(nls1)$parameters[2,1]
+lines(xset,yset,lty=1,lwd=1.5)
+summary(nls1)
+
+# Plotting points
+points(comparative.data$Confocal.pe.mean,comparative.data$Flowcam.pe.mean,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)])
+points(comparative.data$Confocal.pe.mean,comparative.data$Flowcam.pe.mean,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)])
+points(comparative.data$Confocal.pe.mean,comparative.data$Flowcam.pe.mean,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)])
+
+legend(x='bottomright',inset=c(0.01,0.01),legend=c('Starved',expression(paste('Fed ',italic('H. pac.'))),expression(paste('Fed ',italic('T. amp.'))),'Linear model','Log model','Sqrt model'),pch=c(21,24,22,0,0),pt.cex=c(1,1,1,0,0,0),lwd=c(1.5),lty=c(0,0,0,3,2,1),pt.bg='gray80')
+```
+
+### Check algorithm performance
+```{r SUPPFIG 2,fig.height=3,fig.width=9,warning=F}
+par(mar=c(4,4,1,1),mfrow=c(1,3))
+
+sqrt.PE.model <- nls(Flowcam.pe.mean~a*sqrt(Confocal.pe.mean)+b, data = comparative.data, start=list(a=1,b=1))
+summary(sqrt.PE.model)
+sqrt.PE.a <- summary(sqrt.PE.model)$parameters[1,1]
+sqrt.PE.b <- summary(sqrt.PE.model)$parameters[2,1]
+
+lm.Chl.model <- lm(Flowcam.chl.mean~Confocal.pc.mean+Confocal.pe.mean ,data=comparative.data)
+summary(lm.Chl.model)
+lm.Chl.a <- summary(lm.Chl.model)$coefficients[1,1]
+lm.Chl.b <- summary(lm.Chl.model)$coefficients[2,1]
+lm.Chl.c <- summary(lm.Chl.model)$coefficients[3,1]
+
+# Check 1: Square-root model of phycoerythrin
+comparative.data$Confocal.pe.predict <- ((comparative.data$Flowcam.pe.mean-sqrt.PE.b)/sqrt.PE.a)^2
+
+plot(comparative.data$Confocal.pe.predict ~ comparative.data$Confocal.pe.mean,xlab='Measured prop. PE plastids',ylab='Predicted prop. PE plastids',las=1,type='n')
+abline(a=0,b=1)
+points(comparative.data$Confocal.pe.mean,comparative.data$Confocal.pe.predict,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)],cex=1.5);
+points(comparative.data$Confocal.pe.mean,comparative.data$Confocal.pe.predict,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)],cex=1.5);
+points(comparative.data$Confocal.pe.mean,comparative.data$Confocal.pe.predict,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)],cex=1.5)
+
+lm1 <- lm(comparative.data$Confocal.pe.predict ~ comparative.data$Confocal.pe.mean)
+text(max(comparative.data$Confocal.pe.mean,na.rm=T),min(comparative.data$Confocal.pe.predict,na.rm=T),c(expression(paste(R^2,' =          ')),format(summary(lm1)$r.squared,digits=3)),pos=2)
+
+legend(x='topleft',inset=c(0.01,0.01),legend=c('Starved',expression(paste('Fed ',italic('H. pac.'))),expression(paste('Fed ',italic('T. amp.')))),pch=c(21,24,22),pt.cex=1.5,lwd=c(1.5),lty=c(0,0,0,3,2,1),pt.bg='gray80')
+
+# Check 2: Linear model of chlorophyll
+comparative.data$Flowcam.chl.predict <- lm.Chl.a + comparative.data$Confocal.pc.mean*lm.Chl.b + comparative.data$Confocal.pe.mean*lm.Chl.c
+
+plot(comparative.data$Flowcam.chl.predict~comparative.data$Flowcam.chl.mean,xlab='Measured chl. fluorescence',ylab='Mixed model predicted chl. fluorescence',las=1,type='n')
+abline(a=0,b=1)
+points(comparative.data$Flowcam.chl.mean,comparative.data$Flowcam.chl.predict,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)],cex=1.5); 
+points(comparative.data$Flowcam.chl.mean,comparative.data$Flowcam.chl.predict,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)],cex=1.5); 
+points(comparative.data$Flowcam.chl.mean,comparative.data$Flowcam.chl.predict,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)],cex=1.5)
+
+lm1 <- lm(comparative.data$Flowcam.chl.predict~comparative.data$Flowcam.chl.mean)
+text(max(comparative.data$Flowcam.chl.mean,na.rm=T),min(comparative.data$Flowcam.chl.predict,na.rm=T),c(expression(paste(R^2,' =          ')),format(summary(lm1)$r.squared,digits=3)),pos=2)
+
+# Check 3: Predict volume of PC plastids
+comparative.data$Confocal.pc.predict <- (comparative.data$Flowcam.chl.mean-lm.Chl.a-lm.Chl.c*comparative.data$Confocal.pe.predict)/lm.Chl.b
+
+plot(comparative.data$Confocal.pc.predict~comparative.data$Confocal.pc.mean,xlab='Measured prop. PC plastids',ylab='Predicted prop. PC plastids',las=1,type='n')
+abline(a=0,b=1)
+points(comparative.data$Confocal.pc.mean,comparative.data$Confocal.pc.predict,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)],cex=1.5); 
+points(comparative.data$Confocal.pc.mean,comparative.data$Confocal.pc.predict,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)],cex=1.5); 
+points(comparative.data$Confocal.pc.mean,comparative.data$Confocal.pc.predict,pch=c(21,24,22)[as.factor(comparative.data$Prey)],bg=TAtoHPcolset2[as.factor(comparative.data$Expt.Day)],cex=1.5)
+
+lm1 <- lm(Confocal.pc.predict~Confocal.pc.mean,data=comparative.data[comparative.data$Confocal.pc.predict>0,])
+text(max(comparative.data$Confocal.pc.mean,na.rm=T),min(comparative.data$Confocal.pc.predict,na.rm=T),c(expression(paste(R^2,' =          ')),format(summary(lm1)$r.squared,digits=3)),pos=2)
+```
+
+### Look at plastid dynamics
+```{r}
+head(FCDP.Meso.HP.hasplastid)
+```
+
+Find composite fluorescence values
+```{r}
+ARC <- All.Results.Concat
+# Calculating concentrations of cells (in cells per mL), normalizing to the aspirated volume and adjusting for dilution
+ARC$M.pmL <- ARC$TotalMeso/ARC$Aspirated.vol*ARC$Dilu
+ARC$M.pmL.red <- ARC$M.TotRed/ARC$Aspirated.vol*ARC$Dilu
+ARC$M.pmL.blue <- ARC$M.TotBlue/ARC$Aspirated.vol*ARC$Dilu
+
+ARC$C.pmL <- ARC$TotalCrypto/ARC$Aspirated.vol*ARC$Dilu
+ARC$C.pmL.red <- ARC$C.TotRed/ARC$Aspirated.vol*ARC$Dilu
+ARC$C.pmL.blue <- ARC$C.TotBlue/ARC$Aspirated.vol*ARC$Dilu
+
+# Calculating proportion of blue-green cryptophytes
+ARC$C.propblue <- ARC$C.pmL.blue/ARC$C.pmL
+
+# Rounding day to whole number so that we can group by timepoint in downstream calculations
+ARC$Day.Numeric <- round(ARC$Time,digits=0)
+
+ARC$M.meanch1peak <- (ARC$M.pmL.red*ARC$M.Red.meanCh1peak+ARC$M.pmL.blue*ARC$M.Blue.meanCh1peak)/ARC$M.pmL
+ARC$M.meanch2peak <- (ARC$M.pmL.red*ARC$M.Red.meanCh2peak+ARC$M.pmL.blue*ARC$M.Blue.meanCh2peak)/ARC$M.pmL
+for(i in 1:dim(ARC)[1]){
+  if(is.na(ARC$M.meanch1peak[i])){
+    if(is.na(ARC$M.Blue.meanCh1peak[i])){ 
+      ARC$M.meanch1peak[i] <- ARC$M.Red.meanCh1peak[i]
+    }
+  }
+  if(is.na(ARC$M.meanch2peak[i])){
+    if(is.na(ARC$M.Blue.meanCh2peak[i])){
+      ARC$M.meanch2peak[i] <- ARC$M.Red.meanCh2peak[i]
+    }
+  }
+  if(is.na(ARC$M.meanch1peak[i])){
+    if(is.na(ARC$M.Red.meanCh1peak[i])){
+      ARC$M.meanch1peak[i] <- ARC$M.Blue.meanCh1peak[i]
+    }
+  }
+  if(is.na(ARC$M.meanch2peak[i])){
+    if(is.na(ARC$M.Red.meanCh2peak[i])){
+      ARC$M.meanch2peak[i] <- ARC$M.Blue.meanCh2peak[i]
+    }
+  }
+}
+
+```
+
+Using calibration to turn into prop cell volume with PC and PE plastids
+```{r}
+ARC$prop.PE.predict <- ((ARC$M.meanch2peak-sqrt.PE.b)/sqrt.PE.a)^2
+ARC$prop.PC.predict <- (ARC$M.meanch1peak-lm.Chl.a-lm.Chl.c*ARC$prop.PE.predict)/lm.Chl.b
+for(i in 1:dim(ARC)[1]){
+  ARC$prop.PC.predict[i] <- max(0,ARC$prop.PC.predict[i])
+}
+ARC$prop.plastid.predict <- ARC$prop.PE.predict+ARC$prop.PC.predict
+```
+
+Generating labeling scheme for plotting
+```{r}
+ARC$FirstPrey <- ARC$Prey
+ARC[ARC$Flask%in%c('Flask07','Flask08','Flask09','Flask10','Flask11','Flask12'),]$FirstPrey <- 'HP'
+ARC$Prey.Sequence <- paste(ARC$FirstPrey,ARC$Prey,sep='.')
+```
+
+
+```{r SUPPFIG Long Term Plastid Dynamics, fig.height=2.5, fig.width=7.5,warning=F}
+par(mar=c(4,4,1,1),mfrow=c(1,3))
+
+pointcolor <- 'black'
+pointcolor.bg <- 'gray80'
+
+# Panel A: T. amphioxeia plastids
+plot(jitter(ARC$Day.Numeric,.4),ARC$prop.PE.predict,las=1,xlab='Time (days)',ylab=expression(paste('Prop. cell volume ',italic('T. amphioxeia'),' plastids')),pch=c(21,22,22,24)[as.factor(ARC$Prey.Sequence)],bg=c('white','white',pointcolor.bg,TAcol.bg)[as.factor(ARC$Prey.Sequence)],col=c(pointcolor.bg,pointcolor.bg,pointcolor.bg,TAcol.bg)[as.factor(ARC$Prey.Sequence)],cex=c(1.5,1.5,1.5,1.3)[as.factor(ARC$Prey.Sequence)],ylim=c(0,.62))
+
+Summ.Prey <- summarySE(data=ARC, 'prop.PE.predict', groupvars=c('Day.Numeric','Prey'))
+Summ.Prey$PlotPrey <- Summ.Prey$Prey
+Summ.Prey[Summ.Prey$Prey=='00' & Summ.Prey$Day.Numeric > 16,]$PlotPrey <- 'HP'
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$prop.PE.predict+Summ.Prey$se,Summ.Prey$Day.Numeric,Summ.Prey$prop.PE.predict-Summ.Prey$se,code=3,angle=90,length=.02)
+subdat <- Summ.Prey[Summ.Prey$Prey=='00' & Summ.Prey$Day.Numeric < 16,]; lines(subdat$Day.Numeric,subdat$prop.PE.predict)
+subdat1 <- Summ.Prey[Summ.Prey$Prey=='HP' & Summ.Prey$Day.Numeric < 16,];
+subdat2 <- Summ.Prey[Summ.Prey$Prey=='00' & Summ.Prey$Day.Numeric > 16,];
+subdat <- rbind(subdat1,subdat2); lines(subdat$Day.Numeric,subdat$prop.PE.predict)
+subdat2 <- Summ.Prey[Summ.Prey$Prey=='TA' & Summ.Prey$Day.Numeric > 16,];
+subdat <- rbind(subdat1,subdat2); lines(subdat$Day.Numeric,subdat$prop.PE.predict)
+
+points(Summ.Prey$Day.Numeric,Summ.Prey$prop.PE.predict,pch=c(21,22,24)[as.factor(Summ.Prey$PlotPrey)],cex=c(1.5,1.5,1.3)[as.factor(Summ.Prey$PlotPrey)],bg=c('white',pointcolor,TAcol)[as.factor(Summ.Prey$Prey)])
+
+legend(x='bottomleft',inset=c(0.0,0.0),legend=c('Starved',expression(paste('Fed ',italic('H. pacifica'))),expression(paste('Starved after ',italic('Hp'),'-fed')),expression(paste('Fed ',italic('Ta'),' after ',italic('Hp'),'-fed'))),pch=c(21,22,22,24),col='black',pt.bg=c('white',pointcolor,'white',TAcol),pt.cex=c(1.5,1.5,1.5,1.3),cex=1,bty='n')
+text(x=1.3,y=0.615,'(A)')
+
+
+# Panel B: Phycocyanin plastids
+plot(jitter(ARC$Day.Numeric,.4),ARC$prop.PC.predict,las=1,xlab='Time (days)',ylab=expression(paste('Prop. cell volume ',italic('H. pacifica'),' plastids')),pch=c(21,22,22,24)[as.factor(ARC$Prey.Sequence)],bg=c('white','white',pointcolor.bg,TAcol.bg)[as.factor(ARC$Prey.Sequence)],col=c(pointcolor.bg,pointcolor.bg,pointcolor.bg,TAcol.bg)[as.factor(ARC$Prey.Sequence)],cex=c(1.5,1.5,1.5,1.3)[as.factor(ARC$Prey.Sequence)])#,ylim=c(0,.62))
+
+Summ.Prey <- summarySE(data=ARC, 'prop.PC.predict', groupvars=c('Day.Numeric','Prey'))
+Summ.Prey$PlotPrey <- Summ.Prey$Prey
+Summ.Prey[Summ.Prey$Prey=='00' & Summ.Prey$Day.Numeric > 16,]$PlotPrey <- 'HP'
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$prop.PC.predict+Summ.Prey$se,Summ.Prey$Day.Numeric,Summ.Prey$prop.PC.predict-Summ.Prey$se,code=3,angle=90,length=.02)
+subdat <- Summ.Prey[Summ.Prey$Prey=='00' & Summ.Prey$Day.Numeric < 16,]; lines(subdat$Day.Numeric,subdat$prop.PC.predict)
+subdat1 <- Summ.Prey[Summ.Prey$Prey=='HP' & Summ.Prey$Day.Numeric < 16,];
+subdat2 <- Summ.Prey[Summ.Prey$Prey=='00' & Summ.Prey$Day.Numeric > 16,];
+subdat <- rbind(subdat1,subdat2); lines(subdat$Day.Numeric,subdat$prop.PC.predict)
+subdat2 <- Summ.Prey[Summ.Prey$Prey=='TA' & Summ.Prey$Day.Numeric > 16,];
+subdat <- rbind(subdat1,subdat2); lines(subdat$Day.Numeric,subdat$prop.PC.predict)
+
+points(Summ.Prey$Day.Numeric,Summ.Prey$prop.PC.predict,pch=c(21,22,24)[as.factor(Summ.Prey$PlotPrey)],cex=c(1.5,1.5,1.3)[as.factor(Summ.Prey$PlotPrey)],bg=c('white',pointcolor,TAcol)[as.factor(Summ.Prey$Prey)])
+
+text(x=1.3,y=0.167,'(B)')
+
+
+# Panel C: All Plastids
+plot(jitter(ARC$Day.Numeric,.4),ARC$prop.plastid.predict,las=1,xlab='Time (days)',ylab='Prop. cell volume containing plastids',pch=c(21,22,22,24)[as.factor(ARC$Prey.Sequence)],bg=c('white','white',pointcolor.bg,TAcol.bg)[as.factor(ARC$Prey.Sequence)],col=c(pointcolor.bg,pointcolor.bg,pointcolor.bg,TAcol.bg)[as.factor(ARC$Prey.Sequence)],cex=c(1.5,1.5,1.5,1.3)[as.factor(ARC$Prey.Sequence)],ylim=c(0.14,.62))
+
+Summ.Prey <- summarySE(data=ARC, 'prop.plastid.predict', groupvars=c('Day.Numeric','Prey'))
+Summ.Prey$PlotPrey <- Summ.Prey$Prey
+Summ.Prey[Summ.Prey$Prey=='00' & Summ.Prey$Day.Numeric > 16,]$PlotPrey <- 'HP'
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$prop.plastid.predict+Summ.Prey$se,Summ.Prey$Day.Numeric,Summ.Prey$prop.plastid.predict-Summ.Prey$se,code=3,angle=90,length=.02)
+subdat <- Summ.Prey[Summ.Prey$Prey=='00' & Summ.Prey$Day.Numeric < 16,]; lines(subdat$Day.Numeric,subdat$prop.plastid.predict)
+subdat1 <- Summ.Prey[Summ.Prey$Prey=='HP' & Summ.Prey$Day.Numeric < 16,];
+subdat2 <- Summ.Prey[Summ.Prey$Prey=='00' & Summ.Prey$Day.Numeric > 16,];
+subdat <- rbind(subdat1,subdat2); lines(subdat$Day.Numeric,subdat$prop.plastid.predict)
+subdat2 <- Summ.Prey[Summ.Prey$Prey=='TA' & Summ.Prey$Day.Numeric > 16,];
+subdat <- rbind(subdat1,subdat2); lines(subdat$Day.Numeric,subdat$prop.plastid.predict)
+
+points(Summ.Prey$Day.Numeric,Summ.Prey$prop.plastid.predict,pch=c(21,22,24)[as.factor(Summ.Prey$PlotPrey)],cex=c(1.5,1.5,1.3)[as.factor(Summ.Prey$PlotPrey)],bg=c('white',pointcolor,TAcol)[as.factor(Summ.Prey$Prey)])
+
+text(x=1.3,y=0.615,'(C)')
+
+#plot(jitter(ARC$Day.Numeric,.4),ARC$prop.plastid.predict,las=1,xlab='Time (days)',ylab='Prop. cell volume containing plastids',pch=21,bg=c('white',pointcolor.bg)[as.factor(ARC$Prey)],col=pointcolor.bg,cex=1.5,ylim=c(0,0.61))
+
+
+```
+
+### Examine decay rate of plastids vs growth rate of cultures
+```{r,fig.height=4,fig.width=4}
+calib.days <- c(15,16,17,18,19)
+calib.cols <- c(6:10)
+
+subdat <- calib.counts[calib.counts$CountSp=='MR',]
+
+plot(calib.days,subdat[1,calib.cols],type='n',xlab='Time (days)',ylab=expression(paste(italic('M. rubrum'),' popn. (cells/mL)')),las=1,ylim=c(1200,5500))
+for(i in 1:dim(subdat)[1]){
+  if(subdat[i,]$Prey=='TA'){
+    #lines(calib.days,subdat[i,calib.cols])
+    points(jitter(calib.days,.2),subdat[i,calib.cols],bg=TAcol.bg,col=TAcol.bg,pch=24)
+  } else {
+    #lines(calib.days,subdat[i,calib.cols])
+    points(jitter(calib.days,.2),subdat[i,calib.cols],pch=22,,bg=pointcolor.bg,col=pointcolor.bg)
+  }
+}
+
+calib.counts.MR.fed <- calib.counts[calib.counts$Prey=='TA'&calib.counts$CountSp=='MR',]
+calib.counts.MR.starv <- calib.counts[calib.counts$Prey!='TA'&calib.counts$CountSp=='MR',]
+
+lines(calib.days,colMeans(calib.counts.MR.fed[,calib.cols]),col='black')
+points(calib.days,colMeans(calib.counts.MR.fed[,calib.cols]),pch=24,col='black',bg=TAcol)
+lines(calib.days,colMeans(calib.counts.MR.starv[,calib.cols]),col='black')
+points(calib.days,colMeans(calib.counts.MR.starv[,calib.cols]),pch=22,col='black',bg='white')
+
+```
+Amalgamate data for calculations
+```{r}
+pd <- as.data.frame(c(7:12))
+colnames(pd) <- 'Flask'
+pd$Treat <- rep(c('Starved','TA Fed'),each=3)
+pd$Rep <- rep(c('A','B','C'),2)
+pd$mu.15to17 <- NaN
+pd$mu.17to19 <- NaN
+pd$mu.15to19 <- NaN
+pd$PC.15 <- NaN
+pd$PC.17 <- NaN
+pd$PC.19 <- NaN
+
+for(i in 1:dim(pd)[1]){
+  # Calculate growth rates
+  subdat <- calib.counts[calib.counts$CountSp=='MR'&calib.counts$Flask==pd$Flask[i],]
+  pd$mu.15to17[i] <- lm(t(log(subdat[,calib.cols[1:3]]))~calib.days[1:3])$coefficients[2]
+  pd$mu.17to19[i] <- lm(t(log(subdat[,calib.cols[3:5]]))~calib.days[3:5])$coefficients[2]
+  pd$mu.15to19[i] <- lm(t(log(subdat[,calib.cols[1:5]]))~calib.days[1:5])$coefficients[2]
+  
+  # Append plastid contents
+  if(i %in% c(1,4)){ parentflask <- 'Flask02' }
+  if(i %in% c(2,5)){ parentflask <- 'Flask04' }
+  if(i %in% c(3,6)){ parentflask <- 'Flask06' }
+  if(i < 4){ focalflask <- paste('Flask0',pd$Flask[i],sep='')} else {
+    focalflask <- paste('Flask',pd$Flask[i],sep='')
+  }
+  subdat <- rbind(ARC[ARC$Flask==parentflask & ARC$Day.Numeric==15,],ARC[ARC$Flask==focalflask,])
+  pd$PC.15[i] <- subdat$prop.PC.predict[1]; pd$PC.17[i] <- subdat$prop.PC.predict[2]; pd$PC.19[i] <- subdat$prop.PC.predict[3]
+  
+}
+
+# Append cell volumes
+pd$Vol.15 <- rep(aggregate(FCDP.Meso.HP.hasplastid[FCDP.Meso.HP.hasplastid$Day==15,]$Volume..ABD.~FCDP.Meso.HP.hasplastid[FCDP.Meso.HP.hasplastid$Day==15,]$replicate, FUN=mean)[,2],2)
+pd$Vol.17 <- NaN
+pd$Vol.17[1:3] <- aggregate(FCDP.Meso.00.hasplastid[FCDP.Meso.00.hasplastid$Day==17,]$Volume..ABD.~FCDP.Meso.00.hasplastid[FCDP.Meso.00.hasplastid$Day==17,]$replicate, FUN=mean)[,2]
+pd$Vol.17[4:6] <- aggregate(FCDP.Meso.TA.hasplastid[FCDP.Meso.TA.hasplastid$Day==17,]$Volume..ABD.~FCDP.Meso.TA.hasplastid[FCDP.Meso.TA.hasplastid$Day==17,]$replicate, FUN=mean)[,2]
+pd$Vol.19 <- NaN
+pd$Vol.19[1:3] <- aggregate(FCDP.Meso.00.hasplastid[FCDP.Meso.00.hasplastid$Day==19,]$Volume..ABD.~FCDP.Meso.00.hasplastid[FCDP.Meso.00.hasplastid$Day==19,]$replicate, FUN=mean)[,2]
+pd$Vol.19[4:6] <- aggregate(FCDP.Meso.TA.hasplastid[FCDP.Meso.TA.hasplastid$Day==19,]$Volume..ABD.~FCDP.Meso.TA.hasplastid[FCDP.Meso.TA.hasplastid$Day==19,]$replicate, FUN=mean)[,2]
+```
+
+Calculate plastid volumes and rates
+```{r}
+pd$PCvol.15 <- pd$PC.15*pd$Vol.15; pd$PCvol.17 <- pd$PC.17*pd$Vol.17; pd$PCvol.19 <- pd$PC.19*pd$Vol.19
+pd$PCvol.mu.15to17 <- NaN
+pd$PCvol.mu.17to19 <- NaN
+pd$PCvol.mu.15to19 <- NaN
+
+for(i in 1:dim(pd)[1]){
+  pd$PCvol.mu.15to17[i] <- (log(pd$PCvol.17[i])-log(pd$PCvol.15[i]))/2
+  pd$PCvol.mu.17to19[i] <- (log(pd$PCvol.19[i])-log(pd$PCvol.17[i]))/2
+  pd$PCvol.mu.15to19[i] <- lm(log(c(pd$PCvol.15[i],pd$PCvol.17[i],pd$PCvol.19[i]))~c(15,17,19))$coefficients[2]
+  
+  pd$PCvol.mu.15to17.growthcorr[i] <- pd$PCvol.mu.15to17[i] + max(0,pd$mu.15to17[i])
+  pd$PCvol.mu.17to19.growthcorr[i] <- pd$PCvol.mu.17to19[i] + max(0,pd$mu.17to19[i])
+  pd$PCvol.mu.15to19.growthcorr[i] <- pd$PCvol.mu.15to19[i] + max(0,pd$mu.15to19[i])
+}
+
+```
+
+
+Composite figure
+```{r, fig.height=4,fig.width=5}
+
+layout(matrix(data=c(1,1,1,2,2,2,1,1,1,2,2,2,1,1,1,2,2,2,3,3,4,4,5,5,3,3,4,4,5,5,3,3,4,4,5,5,3,3,4,4,5,5),nrow=6,ncol=7,byrow=F))
+
+# Panel A: Population timeseries
+par(mar=c(0.5,4,3,0))
+subdat <- calib.counts[calib.counts$CountSp=='MR',]
+plot(calib.days,subdat[1,calib.cols],type='n',xlab='Time (days)',ylab=expression(paste(italic('M. rubrum'),' popn. (cells/mL)')),las=1,ylim=c(1200,5500),xaxt='n'); axis(side=1,labels=F)
+for(i in 1:dim(subdat)[1]){
+  if(subdat[i,]$Prey=='TA'){
+    #lines(calib.days,subdat[i,calib.cols])
+    points(jitter(calib.days,.2),subdat[i,calib.cols],bg=TAcol.bg,col=TAcol.bg,pch=24)
+  } else {
+    #lines(calib.days,subdat[i,calib.cols])
+    points(jitter(calib.days,.2),subdat[i,calib.cols],pch=22,,bg=pointcolor.bg,col=pointcolor.bg)
+  }
+}
+calib.counts.MR.fed <- calib.counts[calib.counts$Prey=='TA'&calib.counts$CountSp=='MR',]
+calib.counts.MR.starv <- calib.counts[calib.counts$Prey!='TA'&calib.counts$CountSp=='MR',]
+lines(calib.days,colMeans(calib.counts.MR.fed[,calib.cols]),col='black')
+points(calib.days,colMeans(calib.counts.MR.fed[,calib.cols]),pch=24,col='black',bg=TAcol)
+lines(calib.days,colMeans(calib.counts.MR.starv[,calib.cols]),col='black')
+points(calib.days,colMeans(calib.counts.MR.starv[,calib.cols]),pch=22,col='black',bg='white')
+legend(x='topleft',inset=c(0,0),legend='',title='(a)',bty='n')
+legend(x='bottomleft',inset=c(0,0),legend=c('Starved',expression(paste('Fed ',italic('T. amphioxeia')))),pch=c(22,24),pt.bg=c('white',TAcol),bty='n')
+
+# Panel B: PC Plastid timeseries
+par(mar=c(3,4,0.5,0))
+plot(c(15,17,19),pd[1,13:15],type='n',xlab='Time (days)',ylab=expression(paste('Volume ',italic('H. pacifica'),' plastids (',μm^3,')')),las=1,ylim=c(50,1800))
+mtext('Time (days)',side=1,line=2,cex=.65)
+for(i in 1:dim(pd)[1]){
+  if(pd[i,]$Treat=='TA Fed'){
+    #lines(calib.days,subdat[i,calib.cols])
+    points(jitter(c(15,17,19),.2),pd[i,13:15],bg=TAcol.bg,col=TAcol.bg,pch=24)
+  } else {
+    #lines(calib.days,subdat[i,calib.cols])
+    points(jitter(c(15,17,19),.2),pd[i,13:15],pch=22,,bg=pointcolor.bg,col=pointcolor.bg)
+  }
+}
+
+vol.fed <- pd[pd$Treat=='TA Fed',]
+vol.starv <- pd[pd$Treat!='TA Fed',]
+
+lines(c(15,17,19),colMeans(vol.fed[,13:15]),col='black')
+points(c(15,17,19),colMeans(vol.fed[,13:15]),pch=24,col='black',bg=TAcol)
+lines(c(15,17,19),colMeans(vol.starv[,13:15]),col='black')
+points(c(15,17,19),colMeans(vol.starv[,13:15]),pch=22,col='black',bg='white')
+legend(x='topright',inset=c(0,0),legend='',title='(b)',bty='n')
+
+
+# Panel C: Barplot of population growth rates
+par(mar=c(0.5,5,3,1))
+pd.mu <- as.data.frame(cbind(rep(pd$Treat,3),c(pd$mu.15to17,pd$mu.17to19,pd$mu.15to19),rep(c(1:3),each=6)))
+pd.mu$V2 <- as.numeric(as.character(pd.mu$V2))
+bargraph.CI(V3,V2,group=V1,data=pd.mu,las=1,col=c(pointcolor.bg,TAcol.bg),ylab=expression(paste('Growth rate (',d^-1,')')),space=c(0.05,0.5),err.width=0.05,xlab='Experimental date range',names=c('','','')); abline(h=0)
+legend(x='topleft',inset=c(0,-.05),legend='',title='(c)',bty='n')
+
+# Panel D: Barplot of plastid decay rates
+par(mar=c(2,5,1.5,1))
+pd.decay <- as.data.frame(cbind(rep(pd$Treat,3),c(pd$PCvol.mu.15to17,pd$PCvol.mu.17to19,pd$PCvol.mu.15to19),rep(c(1:3),each=6)))
+pd.decay$V2 <- as.numeric(as.character(pd.decay$V2))
+bargraph.CI(V3,-1*V2,group=V1,data=pd.decay,las=1,col=c(pointcolor.bg,TAcol.bg),ylab=expression(paste(italic('Hp'),' plastid loss rate (',d^-1,')')),err.width=0.05,space=c(0.05,0.5),xlab='Experimental date range',names=c('','','')); abline(h=0)
+legend(x='topleft',inset=c(0,0),legend='',title='(d)',bty='n')
+
+# Panel E: Barplot of plastid decay rates, correcting for population growth
+par(mar=c(3,5,0.5,1))
+pd.decay.corr <- as.data.frame(cbind(rep(pd$Treat,3),c(pd$PCvol.mu.15to17.growthcorr,pd$PCvol.mu.17to19.growthcorr,pd$PCvol.mu.15to19.growthcorr),rep(c(1:3),each=6)))
+pd.decay.corr$V2 <- as.numeric(as.character(pd.decay.corr$V2))
+bargraph.CI(V3,-1*V2,group=V1,data=pd.decay.corr,las=1,col=c(pointcolor.bg,TAcol.bg),ylab=expression(paste('Corr. loss rate (',d^-1,')')),err.width=0.05,space=c(0.05,0.5),xlab='Experimental date range',names=c('15 to 17','17 to 19','15 to 19')); abline(h=0)
+mtext('Experimental date range',side=1,line=2,cex=.65)
+legend(x='topleft',inset=c(0,0),legend='',title='(e)',bty='n')
+
+```
+
+```{r}
+bargraph.CI(V3,-1*V2,group=V1,data=pd.decay.corr,las=1,col=c(pointcolor.bg,TAcol.bg),ylab=expression(paste('Growth-corrected plastid loss rate (',d^-1,')')),space=c(0.05,0.5),xlab='Experimental date range',names=c('15 to 17','17 to 19','15 to 19')); abline(h=0)
+
+```
+
+
+
+# Experiment 1: Grazing functional response
+
+### Data import
+```{r}
+# Load data
+dat <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/Mrubrum_fedHP_FunctionalResponseCurves - Exp2_22Nov2023.csv")
+dat <- dat[!is.na(dat$Treat),]
+
+ratio.summ <- summarySE(data=dat[dat$TargetMR>0,],'R_D0',groupvars='TargetHP')
+dat$InitRatio <- ratio.summ$R_D0[match(dat$TargetHP,ratio.summ$TargetHP)]
+
+fire <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/Mrubrum_fedHP_FunctionalResponseCurves - Exp2_PECurves.csv")
+
+# Make a list of all the different prey concentrations
+preyconc <- levels(as.factor(dat$TargetHP))
+
+# Dates for plotting
+days <- c(0,1,2,3,4,6,8)
+
+# Select the columns to use for plotting
+preycolumns <- c(15:21) # columns with H. pacifica data
+predcolumns <- c(5:11) # columns with M. rubrum data
+```
+
+### Figure setup
+```{r}
+# Set up colors for each prey concentration; using VanGogh3 palette from MetBrewer https://github.com/BlakeRMills/MetBrewer
+ltteal <- rgb(223/255,249/255,252/255) # random teal color ramp
+dkteal <- rgb(27/255,116/255,129/255)
+ctrlcol <- 'gray80'
+colfunc <- colorRampPalette(c(ltteal,dkteal))
+col2use <- colfunc(length(preyconc))
+
+# Set up line types for different predation treatments
+predtreats <- levels(as.factor(dat$TargetMR))
+ltys <- c(1:length(predtreats))
+```
+
+
+### Estimating growth rates and plotting results
+```{r}
+# Add new columns to our data frame that we will use for prey and predator growth rates and y-intercepts. We'll consider both 24 and 48hr windows.
+dat$prey.mu.96 <- NaN
+dat$prey.yint.96 <- NaN
+
+dat$pred.mu.96 <- NaN
+dat$pred.yint.96 <- NaN
+
+dat$prey.mu.48 <- NaN
+dat$prey.yint.48 <- NaN
+
+dat$pred.mu.48 <- NaN
+dat$pred.yint.48 <- NaN
+
+# Fit the growth curves line-by-line, using lm()
+
+for( i in 1:dim(dat)[1] ){ # for each row in the data table
+  
+  if(dat[i,]$TargetHP!=0){ # Only fit prey if we expect positive densities
+  # Fit all prey
+  lm1 <- lm(log(t(dat[i,preycolumns[1:3]]))~days[1:3])
+  dat$prey.mu.48[i] <- summary(lm1)$coefficients[2,1]
+  dat$prey.yint.48[i] <- summary(lm1)$coefficients[1,1]
+  
+  lm1 <- lm(log(t(dat[i,preycolumns[1:5]]))~days[1:5])
+  dat$prey.mu.96[i] <- summary(lm1)$coefficients[2,1]
+  dat$prey.yint.96[i] <- summary(lm1)$coefficients[1,1]
+  
+  
+  }
+  
+  if( dat[i,]$TargetMR!=0 ){ # Only fit predators if we expect non-zero densities
+  # Fit predator
+  lm1 <- lm(log(t(dat[i,predcolumns[1:3]]))~days[1:3])
+  dat$pred.mu.48[i] <- summary(lm1)$coefficients[2,1]
+  dat$pred.yint.48[i] <- summary(lm1)$coefficients[1,1]
+  
+  lm1 <- lm(log(t(dat[i,predcolumns[1:5]]))~days[1:5])
+  dat$pred.mu.96[i] <- summary(lm1)$coefficients[2,1]
+  dat$pred.yint.96[i] <- summary(lm1)$coefficients[1,1]
+  }
+}
+
+
+```
+
+
+Let's check our work by adding our growth curves to our plot!
+
+```{r,fig.height=4,fig.width=8}
+
+par(mar=c(4,5,1,1),mfrow=c(1,2))
+
+dat2 <- dat[dat$TargetHP!=0,]
+
+plot(days,dat2[1,preycolumns],las=1,xlab='Time (days)',ylab='',log='y',ylim=c((min(dat2[,preycolumns],na.rm=T)),(max(dat2[,preycolumns],na.rm=T))),type='n',main='Prey')
+mtext('Population size (cells/mL)',side=2,line=4)
+
+for(i in 2:length(preyconc)){
+  subdat <- dat2[dat2$TargetHP==preyconc[i],]
+  for(j in 1:dim(subdat)[1]){
+    if(subdat[j,]$TargetMR==0){
+      points(days,subdat[j,preycolumns],col=col2use[i],pch=21,bg=col2use[i])
+      lines(days,subdat[j,preycolumns],col=col2use[i],lty=3)
+    
+      # 48hr growth curve
+      #xcoords <- seq(from = min(days), to = max(days[3]), length.out = 100)
+      #ycoords <- exp(subdat[j,]$prey.yint.48)*exp(subdat[j,]$prey.mu.48*xcoords)
+      #lines(xcoords,ycoords,col=col2use[i])
+      
+      # 96hr growth curve
+      xcoords <- seq(from = min(days), to = max(days[5]), length.out = 100)
+      ycoords <- exp(subdat[j,]$prey.yint.96)*exp(subdat[j,]$prey.mu.96*xcoords)
+      lines(xcoords,ycoords,col=col2use[i],lwd=2)
+      
+    }      else{
+      
+      points(days,subdat[j,preycolumns],col=col2use[i],pch=22,bg=col2use[i])
+      lines(days,subdat[j,preycolumns],col=col2use[i],lty=3)
+      # 48hr growth curve
+      #xcoords <- seq(from = min(days), to = max(days[3]), length.out = 100)
+      #ycoords <- exp(subdat[j,]$prey.yint.48)*exp(subdat[j,]$prey.mu.48*xcoords)
+      #lines(xcoords,ycoords,col=col2use[i],lty=2)
+      
+      # 96hr growth curve
+      xcoords <- seq(from = min(days), to = max(days[5]), length.out = 100)
+      ycoords <- exp(subdat[j,]$prey.yint.96)*exp(subdat[j,]$prey.mu.96*xcoords)
+      lines(xcoords,ycoords,col=col2use[i],lty=2,lwd=2)
+    }
+  }
+}
+
+
+dat2 <- dat[dat$TargetMR!=0,]
+plot(days,dat2[1,predcolumns],las=1,xlab='Time (days)',ylab='Population size (cells/mL)',log='y',ylim=c((min(dat2[,predcolumns],na.rm=T)),(max(dat2[,predcolumns],na.rm=T))),type='n',main='Predator')
+#mtext('Population size (cells/mL)',side=2,line=4)
+
+for(i in 1:length(preyconc)){
+  subdat <- dat2[dat2$TargetHP==preyconc[i],]
+  for(j in 1:dim(subdat)[1]){
+    points(days,subdat[j,predcolumns],col=col2use[i],pch=21,bg=col2use[i])
+    lines(days,subdat[j,predcolumns],col=col2use[i],lty=3)
+    # 48hr growth curve
+      #xcoords <- seq(from = min(days), to = max(days[3]), length.out = 100)
+      #ycoords <- exp(subdat[j,]$pred.yint.48)*exp(subdat[j,]$pred.mu.48*xcoords)
+      #lines(xcoords,ycoords,col=col2use[i])
+      
+    # 96hr growth curve
+      xcoords <- seq(from = min(days), to = max(days[5]), length.out = 100)
+      ycoords <- exp(subdat[j,]$pred.yint.96)*exp(subdat[j,]$pred.mu.96*xcoords)
+      lines(xcoords,ycoords,col=col2use[i],lwd=2)
+  }
+}
+
+
+```
+
+### Jeong & Latz calculations
+
+Mean population sizes
+```{r}
+dat$prey.popn.48 <- dat$HP_D0*(exp(2*dat$prey.mu.48)-1)/(2*dat$prey.mu.48) # mean prey population
+dat$prey.popn.96 <- dat$HP_D0*(exp(4*dat$prey.mu.96)-1)/(4*dat$prey.mu.96) # mean prey population
+
+dat[dat$TargetHP==0,]$prey.popn.48 <- 0
+dat[dat$TargetHP==0,]$prey.popn.96 <- 0
+```
+
+Prey population dynamics
+```{r,fig.height=6,fig.width=9,warning=F}
+subdat <- dat[dat$TargetHP==max(dat$TargetHP) & dat$TargetMR==0,]
+
+tset <- seq(from = 0, to = 15, length.out = 100)
+HP.r <- mean(c(dat[dat$TargetMR==0,]$prey.mu.48,dat[dat$TargetMR==0,]$prey.mu.96))
+HP.r <- mean(dat[dat$TargetMR==0,]$prey.mu.96)
+HP.K <- 2e6
+HP.0 <- mean(subdat$HP_D0)
+
+HPset <- NaN*tset; HPset[1] <- HP.0
+for(i in 2:length(tset)){
+  HPset[i] <- HPset[i-1] + (tset[i]-tset[i-1])*(HP.r*HPset[i-1]*(1-HPset[i-1]/HP.K))
+}
+
+par(mar=c(4,5,1,1))
+
+font.mult <- 1.5
+pt.mult <- 1.5
+plot(days,subdat[1,preycolumns]/1e6,las=1,xlim=c(min(tset),max(tset)),ylim=c(0,2),xlab='Time (days)',ylab=expression(paste(italic(Hemiselmis),' abundance, ',10^6,' cells/mL')),bg=col2use[length(preyconc)],col=col2use[length(preyconc)],pch=21,cex.axis=font.mult,cex.lab=font.mult,cex=pt.mult)
+points(days,subdat[2,preycolumns]/1e6,bg=col2use[length(preyconc)],col=col2use[length(preyconc)],pch=21,cex=pt.mult)
+lines(tset,HPset/1e6,col=col2use[length(preyconc)],lwd=2*pt.mult)
+
+
+for(j in 1:length(preyconc)){
+  subdat <- dat[dat$TargetHP==preyconc[j] & dat$TargetMR==0,]
+  # Plot points
+  for(k in 1:dim(subdat)[1]){
+    points(days,subdat[k,preycolumns]/1e6,bg=col2use[j],col=col2use[j],pch=21,cex=pt.mult)
+  }
+  # Run simulation
+  HP.0 <- mean(subdat$HP_D0)
+  if(j == 6){HP.0 <- 1.5*HP.0}
+  HPset <- NaN*tset; HPset[1] <- HP.0
+  for(i in 2:length(tset)){
+    HPset[i] <- HPset[i-1] + (tset[i]-tset[i-1])*(HP.r*HPset[i-1]*(1-HPset[i-1]/HP.K))
+  }
+  lines(tset,HPset/1e6,col=col2use[j],lwd=2*pt.mult)
+}
+
+u <- par("usr")
+v <- c(
+  grconvertX(u[1:2], "user", "ndc"),
+  grconvertY(u[3:4], "user", "ndc")
+)
+v <- c( (v[1]+v[2])/2, v[2], (v[3]+v[4])/2, v[4] )
+v <- c( .18*(v[1]+v[2])/2, .65*(v[1]+v[2])/2, .75*(v[3]+v[4])/2, v[4] )
+par( fig=v, new=TRUE, mar=c(2,3,1,.1) )
+bargraph.CI(TargetHP,prey.mu.96,data=dat[dat$TargetMR==0,],err.width = .05,las=1,col=col2use,ylim=c(0,.9),ylab='',names='')
+#plot(c(1:3),c(1:3))
+mtext(expression(paste('Initial growth rate (',d^-1,')')),side=2,line=2.5)
+axis(side=1,at=seq(from = 0.7, to = 7, by = 1.2),labels= c(round(unique(dat$InitRatio)[2:5],1),round(unique(dat$InitRatio)[6:7])), tick = F,padj=-1.5,cex.axis=1)
+mtext(expression(paste('Initial ',italic(Hemiselmis),' ratio')),side=1,line=1.2)
+abline(h=HP.r,lty=2); text(-0.2,HP.r+.037,'Average μ',pos=4)
+bargraph.CI(TargetHP,prey.mu.96,data=dat[dat$TargetMR==0,],err.width = .05,las=1,col=col2use,ylim=c(0,.9),ylab='',names='',add=T)
+
+#plot(d0_inset, axes=FALSE, xlab="", ylab="")
+box()
+
+```
+
+The first thing that we need to do is match up our control (predator-free) growth rates with our predator ones. We'll use the mean prey growth rates from the control studies to do this.
+```{r}
+# Make a data summary of the control growthrates using the summarySE function. Notice how I'm subsetting the dataframe to only include the "control" treatments.
+summ.prey.mu.96 <- summarySE(data=dat[dat$TargetMR==0&dat$TargetHP>0,],'prey.mu.96',groupvars=c('TargetHP'))
+summ.prey.mu.96
+
+dat$ctrl.prey.mu.96 <- summ.prey.mu.96$prey.mu.96[match(dat$TargetHP,summ.prey.mu.96$TargetHP)] # the "match" function is a really powerful tool for linking data. Here, I'm using the "target prey" variable to make sure I match the correct average growth rates to each row in my data frame.
+
+head(dat) # we can inspect the data frame to see if this worked. notice how the growth rates line up?
+
+```
+
+From here, we can compute our grazing rates as the difference between the control and +predator growth rates.
+```{r}
+dat$prey.g.96 <- dat$ctrl.prey.mu.96-dat$prey.mu.96
+```
+
+Computing the per-predator ingestion rate is a little trickier. Ask someone to show you the calculus on the whiteboard, but essentially what we are doing is using the growth rates of both predators and prey to compute mean populations of both, and then computing the per-predator ingestion rate from there. This method follows Jeong & Latz (1994) (https://www.int-res.com/articles/meps/106/m106p173.pdf)
+
+```{r}
+dat$pred.popn.96 <- dat$MR_D0*(exp(4*dat$pred.mu.96)-1)/(4*dat$pred.mu.96) # mean predator population
+dat$prey.i.96 <- dat$prey.g.96*dat$prey.popn.96/dat$pred.popn.96 # ingestion = mean prey * grazing rate / mean predator
+
+# Finally we'll manually fill in grazing and ingestion rates of 0 for 0 prey treatments.
+dat[dat$TargetHP==0&dat$TargetMR!=0,]$prey.g.96 <- 0
+dat[dat$TargetHP==0&dat$TargetMR!=0,]$prey.i.96 <- 0
+dat[dat$TargetHP==0&dat$TargetMR!=0,]$prey.popn.96 <- 0
+```
+
+A scatterplot is even better because we can see our results as a function of the actual initial prey concentration. We can even work on fitting our data with a Holling Type II (saturating) functional response.
+
+```{r,fig.width=5.5,fig.height=4}
+
+par(mar=c(4,4,1,1))
+subdat <- dat[dat$TargetMR!=0,]
+
+plot((subdat$prey.popn.96/(10^3)),subdat$prey.i.96,las=1,xlab=expression(paste('Mean ',italic(Hp),' Population (',10^3,' cells/mL)')),ylab=expression(paste('Ingestion Rate (',italic(Hp),' per ',italic(Mr),' per day)')),pch=21,lwd=2,col=col2use[as.factor(subdat$TargetHP)],bg=col2use[as.factor(subdat$TargetHP)])
+
+a.est <- summary(lm(subdat[1:7,]$prey.i.96~subdat[1:7,]$prey.popn.96))$coefficients[2,1] # estimate initial slope
+h.est <- 1/max(subdat$prey.i.96,na.rm=T) # estimate handling time
+
+fit1 <- nls(prey.i.96 ~ a*prey.popn.96/(1+a*h*prey.popn.96),data=subdat,start = list(a = a.est, h = h.est))
+a.fit <- summary(fit1)$parameters[1,1]
+h.fit <- summary(fit1)$parameters[2,1]
+
+xcoords <- seq(from = 0, to = max(subdat$prey.popn.96,na.rm=T),length.out = 100)
+ycoords <- a.fit*xcoords/(1+a.fit*h.fit*xcoords)
+lines(xcoords/10^3,ycoords,lwd=2,col='gray50')
+
+#text(0,0,summary(fit1)$parameters[1,])
+
+#a.fit; h.fit
+summary(fit1)
+```
+
+### Main text figure
+
+```{r,fig.width=4.5,fig.height=6}
+
+pointcolor <- 'gray50'
+
+par(mar=c(1.5,4,2,1),mfrow=c(2,1))
+subdat <- dat[dat$TargetMR!=0,]
+
+plot((subdat$prey.popn.96/(10^3)),subdat$prey.i.96,las=1,xlab='',ylab='',pch=21,lwd=2,col=pointcolor,bg=pointcolor,cex=1.25,xaxt='n')
+axis(side=1,labels=F)
+mtext(expression(paste('Ingestion rate')),side=2,line=2.7)
+mtext(expression(paste('(',italic('H. pacifica · '),italic('M. rubrum')^-1,' · ',d^-1,')')),side=2,line=1.6)
+a.est <- summary(lm(subdat[1:7,]$prey.i.96~subdat[1:7,]$prey.popn.96))$coefficients[2,1] # estimate initial slope
+h.est <- 1/max(subdat$prey.i.96,na.rm=T) # estimate handling time
+
+fit1 <- nls(prey.i.96 ~ a*prey.popn.96/(1+a*h*prey.popn.96),data=subdat,start = list(a = a.est, h = h.est))
+a.fit <- summary(fit1)$parameters[1,1]
+h.fit <- summary(fit1)$parameters[2,1]
+
+xcoords <- seq(from = 0, to = max(subdat$prey.popn.96,na.rm=T),length.out = 100)
+ycoords <- a.fit*xcoords/(1+a.fit*h.fit*xcoords)
+lines(xcoords/10^3,ycoords,lwd=2,col='black')
+
+xdisp = 16.3
+ydisp = 0.2
+text(xdisp,ydisp+1.4, expression(paste("Holling Type II fit")),pos=2)
+text(xdisp,ydisp+.7,expression(paste("a = 7.068 x ",10^-3)),pos=2)
+text(xdisp,ydisp,expression(paste("h = 3.331 x ",10^-2)),pos=2)
+text(0.3,7.5,'(A)')
+
+
+par(mar=c(3.5,4,0,1))
+subdat <- dat[dat$TargetMR!=0,]
+
+plot((subdat$prey.popn.96/(10^3)),subdat$pred.mu.96,las=1,xlab='',ylab='',pch=21,lwd=2,col=pointcolor,bg=pointcolor,cex=1.25)
+mtext(expression(paste('Mean ',italic('H. pacifica'),' population (',10^3,' cells · ',mL^-1,')')),side=1,line=2.5)
+mtext(expression(paste(italic('M. rubrum'),' growth rate (',d^-1,')')),side=2,line=2.7)
+a.est <- summary(lm(subdat[1:7,]$pred.mu.96~subdat[1:7,]$prey.popn.96))$coefficients[2,1] # estimate initial slope
+h.est <- 1/max(subdat$pred.mu.96,na.rm=T) # estimate handling time
+c.est <- 0
+
+fit1 <- nls(pred.mu.96 ~ a*prey.popn.96/(1+a*h*prey.popn.96) + c,data=subdat,start = list(a = a.est, h = h.est, c = c.est))
+a.fit <- summary(fit1)$parameters[1,1]
+h.fit <- summary(fit1)$parameters[2,1]
+c.fit <- summary(fit1)$parameters[3,1]
+
+gmax.est <- 1/h.est
+H.est <- 1/a.est/h.est
+
+fit2 <- nls(pred.mu.96 ~ gmax*prey.popn.96/(H + prey.popn.96)+c, data = subdat, start = list(gmax = gmax.est, H=H.est, c = c.est))
+gmax.fit <- summary(fit2)$parameters[1,1]
+H.fit <- summary(fit2)$parameters[2,1]
+c.fit <- summary(fit2)$parameters[3,1]
+
+xcoords <- seq(from = 0, to = max(subdat$prey.popn.96,na.rm=T),length.out = 100)
+ycoords <- gmax.fit*xcoords/(H.fit + xcoords) + c.fit
+lines(xcoords/10^3,ycoords,lwd=2,col='black')
+
+xdisp = 16.3
+ydisp = 0.01
+linespacing = 0.025
+text(xdisp,ydisp+linespacing*3, expression(paste("Monod saturating fit")),pos=2)
+text(xdisp,ydisp+linespacing*2,expression(paste(g[max]," = 0.4501")),pos=2)
+text(xdisp,ydisp+linespacing*1,expression(paste("H = 1.588 x ",10^4)),pos=2)
+text(xdisp,ydisp,expression(paste(g[0]," = 3.127 x ",10^-2)),pos=2)
+text(0.3,0.245,'(B)')
+```
+
+### Revision: Comparison of linear and saturating functional responses
+
+```{r,fig.width=4.5,fig.height=6}
+
+pointcolor <- 'gray50'
+
+par(mar=c(1.5,4,2,1),mfrow=c(2,1))
+
+plot((subdat$prey.popn.96/(10^3)),subdat$prey.i.96,las=1,xlab='',ylab='',pch=21,lwd=2,col=pointcolor,bg=pointcolor,cex=1.25,xaxt='n')
+axis(side=1,labels=F)
+mtext(expression(paste('Ingestion rate')),side=2,line=2.7)
+mtext(expression(paste('(',italic('H. pacifica · '),italic('M. rubrum')^-1,' · ',d^-1,')')),side=2,line=1.6)
+a.est <- summary(lm(subdat[1:7,]$prey.i.96~subdat[1:7,]$prey.popn.96))$coefficients[2,1] # estimate initial slope
+h.est <- 1/max(subdat$prey.i.96,na.rm=T) # estimate handling time
+
+# Linear model, forcing y-intercept through 0
+lm1 <- lm(prey.i.96 ~ -1 + prey.popn.96, data=subdat)
+m.est <- lm1$coefficients[1]
+xcoords <- seq(from = 0, to = max(subdat$prey.popn.96,na.rm=T),length.out = 100)
+ycoords <- xcoords*m.est
+lines(xcoords/10^3,ycoords,lwd=2,col='dodgerblue')
+
+# Holling Type II
+fit1 <- nls(prey.i.96 ~ a*prey.popn.96/(1+a*h*prey.popn.96),data=subdat,start = list(a = a.est, h = h.est))
+a.fit <- summary(fit1)$parameters[1,1]
+h.fit <- summary(fit1)$parameters[2,1]
+
+ycoords <- a.fit*xcoords/(1+a.fit*h.fit*xcoords)
+lines(xcoords/10^3,ycoords,lwd=2,col='black')
+
+xdisp = 16.3
+ydisp = 0.2
+#text(xdisp,ydisp+1.4, expression(paste("Holling Type II fit")),pos=2)
+#text(xdisp,ydisp+.7,expression(paste("a = 7.068 x ",10^-3)),pos=2)
+#text(xdisp,ydisp,expression(paste("h = 3.331 x ",10^-2)),pos=2)
+text(0.3,7.5,'(A)')
+
+legend(x='bottomright',inset=c(0,0),legend=c('Linear Model','RSE = 0.7357, AIC = 36.32','Saturating Model','RSE = 0.6741, AIC = 34.59'),lwd=c(2,0,2,0),col=c('dodgerblue','dodgerblue','black','black'),bty = 'n',cex=.8)
+
+
+par(mar=c(3.5,4,0,1))
+subdat <- dat[dat$TargetMR!=0,]
+
+plot((subdat$prey.popn.96/(10^3)),subdat$pred.mu.96,las=1,xlab='',ylab='',pch=21,lwd=2,col=pointcolor,bg=pointcolor,cex=1.25)
+mtext(expression(paste('Mean ',italic('H. pacifica'),' population (',10^3,' cells · ',mL^-1,')')),side=1,line=2.5)
+mtext(expression(paste(italic('M. rubrum'),' growth rate (',d^-1,')')),side=2,line=2.7)
+a.est <- summary(lm(subdat[1:7,]$pred.mu.96~subdat[1:7,]$prey.popn.96))$coefficients[2,1] # estimate initial slope
+h.est <- 1/max(subdat$pred.mu.96,na.rm=T) # estimate handling time
+c.est <- 0
+
+# Linear model
+lm1 <- lm(pred.mu.96 ~ prey.popn.96, data=subdat)
+m.est <- lm1$coefficients[2]
+b.est <- lm1$coefficients[1]
+xcoords <- seq(from = 0, to = max(subdat$prey.popn.96,na.rm=T),length.out = 100)
+ycoords <- xcoords*m.est+b.est
+lines(xcoords/10^3,ycoords,lwd=2,col='dodgerblue')
+
+# Holling Type II
+fit1 <- nls(pred.mu.96 ~ a*prey.popn.96/(1+a*h*prey.popn.96) + c,data=subdat,start = list(a = a.est, h = h.est, c = c.est))
+a.fit <- summary(fit1)$parameters[1,1]
+h.fit <- summary(fit1)$parameters[2,1]
+c.fit <- summary(fit1)$parameters[3,1]
+
+gmax.est <- 1/h.est
+H.est <- 1/a.est/h.est
+
+fit2 <- nls(pred.mu.96 ~ gmax*prey.popn.96/(H + prey.popn.96)+c, data = subdat, start = list(gmax = gmax.est, H=H.est, c = c.est))
+gmax.fit <- summary(fit2)$parameters[1,1]
+H.fit <- summary(fit2)$parameters[2,1]
+c.fit <- summary(fit2)$parameters[3,1]
+
+xcoords <- seq(from = 0, to = max(subdat$prey.popn.96,na.rm=T),length.out = 100)
+ycoords <- gmax.fit*xcoords/(H.fit + xcoords) + c.fit
+lines(xcoords/10^3,ycoords,lwd=2,col='black')
+
+xdisp = 16.3
+ydisp = 0.01
+linespacing = 0.025
+#text(xdisp,ydisp+linespacing*3, expression(paste("Monod saturating fit")),pos=2)
+#text(xdisp,ydisp+linespacing*2,expression(paste(g[max]," = 0.4501")),pos=2)
+#text(xdisp,ydisp+linespacing*1,expression(paste("H = 1.588 x ",10^4)),pos=2)
+#text(xdisp,ydisp,expression(paste(g[0]," = 3.127 x ",10^-2)),pos=2)
+text(0.3,0.245,'(B)')
+
+legend(x='bottomright',inset=c(0,0),legend=c('Linear Model','RSE = 0.0331, AIC = -55.83','Saturating Model','RSE = 0.0103, AIC = -58.67'),lwd=c(2,0,2,0),col=c('dodgerblue','dodgerblue','black','black'),bty = 'n',cex=.8)
+```
+
+### Revision: GGE
+
+I'm approximating gross growth efficiency as the growth rate divided by the ingestion rate
+```{r,fig.height=3.5,fig.width=7.5}
+par(mar=c(4,4,1,1),mfrow=c(1,2))
+subdat$GGE <- subdat$pred.mu.96/subdat$prey.i.96
+subdat2 <- subdat[subdat$prey.popn.96>0,]
+plot(subdat2$prey.popn.96/1000,subdat2$GGE, xlab=expression(paste('Mean ',italic('H. pacifica'),' popn. (',10^3,' cells · ',mL^-1,')')), las=1, ylab=expression(paste('Gross growth efficiency, cellular')), pch=21, col = pointcolor, bg= pointcolor, cex=1.5 )
+
+plot(subdat2$prey.popn.96/1000,1/subdat2$GGE, xlab=expression(paste('Mean ',italic('H. pacifica'),' popn. (',10^3,' cells · ',mL^-1,')')), las=1, ylab=expression(paste(italic('H. pacifica'), ' per ', italic('M. rubrum'))), pch=21, col = pointcolor, bg= pointcolor, cex=1.5 )
+abline(h= mean(c(25.022388, 22.730732, 24.557177, 26.991875, 32.050628, 23.784593, 32.783537, 25.330859, 28.281495, 34.200815)), lty=2)
+```
+
+GGE per C
+
+```{r,fig.height=3.5,fig.width=7.5}
+par(mar=c(4,4,1,1),mfrow=c(1,2))
+subdat$GGE.C <- subdat$pred.mu.96/subdat$prey.i.96*650/40
+subdat2 <- subdat[subdat$prey.popn.96>0,]
+plot(subdat2$prey.popn.96/1000,subdat2$GGE.C, xlab=expression(paste('Mean ',italic('H. pacifica'),' popn. (',10^3,' cells · ',mL^-1,')')), las=1, ylab=expression(paste('Gross growth efficiency, Carbon')), pch=21, col = pointcolor, bg= pointcolor, cex=1.5 )
+
+plot(subdat2$prey.popn.96/1000,1/subdat2$GGE.C, xlab=expression(paste('Mean ',italic('H. pacifica'),' popn. (',10^3,' cells · ',mL^-1,')')), las=1, ylab=expression(paste(italic('H. pacifica'), ' C per ', italic('M. rubrum'),' C')), pch=21, col = pointcolor, bg= pointcolor, cex=1.5 )
+abline(h= 1/mean(c(0.6494184, 0.7148912, 0.6617210, 0.6020330, 0.5070104, 0.6832154, 0.4956756, 0.6415100, 0.5745807, 0.4751349)), lty=2)
+```
+
+
+
+# Experiment 2: Prey selection
+### Setup FlowCam file structure
+```{r}
+#Insert the location of your main folder for the current experiment.
+#Alter this line to refer to the file location where the excel sheet is.
+root_folder <- "/Users/hollyvm/GoogleSync/StudentWork/AmelieLEtoileGoga/MRpreychoice_Nov2023"
+
+#In the main folder create a folder name CSV_files, if named other wise change "/CSV_files" accordingly
+CSV_folder <- paste(root_folder,"/CSV_files",sep = "")
+
+#List the sub-folders of the current experiment, this would usually be one folder for each sampling day.
+Folder_list <- c("D0","D1","D2","D3","D4")
+
+expt.day <- Folder_list
+
+knitr::opts_knit$set(root.dir = root_folder)
+
+#A .csv file should be created with extra meta-data, such as data for sampling time and dilution. If other data is acquired, such as pigment extractions, include these in the this file as well.
+expt.meta <- read.csv("/Users/hollyvm/GoogleSync/StudentWork/AmelieLEtoileGoga/MRpreychoice_Nov2023/ALG_Expt2_OctNov2023_MRpreychoice - Dil_time.csv")
+```
+
+### Analyze FlowCam data and generate summary of results
+```{r,fig.height=8,fig.width=8}
+#Using the previously defined Folder_list, a for loop is created to access each folder one at a time, and within those folder each sample is then accessed one at a time.
+#Each data set is being processed using the MRMC.partitioning function, which distinguished Red Chloroplast MC from blue-green Chloroplast MC. By using the meta-data stored in the file-name a new data-sheet is created with the desired data where each row is from a single sample from a single day.
+
+create_plot_meso = F #If TRUE, the partitioning will output partitioned Ch1 vs Ch2 plots -- MESODINIUM VERSION
+create_plot_prey = F #If TRUE, the partitioning will output partitioned Ch1 vs Ch2 plots -- PREY VERSION
+
+unk.part.Meso = 5.5 # unknown partition for Mesodinium
+bg.part.Meso = 4.5 # blue-green partition for Mesodinium
+unk.part.prey = 0 # unknown partition for cryptophytes
+bg.part.prey = 4.5 # blue-green partition for cryptophytes
+
+#The first for-loop is created to open the folder of the individual sampling day in the order as they were defined (usually chronologically)
+for(dir_idx in 1:length(Folder_list)){
+  
+  #The working directory is set to the folder containing one days worth of data.
+  current_folder <- paste(root_folder,"/",Folder_list[dir_idx],sep = "")
+  
+  #Recording the current experimental day
+  today <- expt.day[dir_idx]
+  
+  #here the columns to retrieve timestamp and dilution is defined.
+  dil_name <- paste("Dil.",today,sep = "")
+  time_name <- paste("TS.",today,sep = "")
+  
+  #The function list.files(current_folder), will create a list of files that are located in the folder, and by using this list of files, a new for-loop is created accessing each file consecutively.
+  for(i in 1:length(list.files(current_folder))){
+    
+    #extracting meta data from the file name
+    #Characters 1 to 7 is the Flask index
+    name_flask <- substring(list.files(current_folder)[i],
+                            first = 1,
+                            last = 7)
+    
+    #assigning flask index as a number
+    num_flask <- as.integer(substring(list.files(current_folder)[i],
+                                      first = 6,
+                                      last = 7))
+    
+    #Characters 9 to 12 is the Mesodinium pre-experiment plastid type
+    Meso_designation <- substring(list.files(current_folder)[i],
+                                  first = 9,
+                                  last = 12)
+    
+    #Characters 14 through 18 indicate the prey being fed during the experiment
+    prey_designation <- substring(list.files(current_folder)[i],
+                                  first = 14,
+                                  last = 18)
+    
+    #Character 20 is the replicate indicator
+    expt_rep <- substring(list.files(current_folder)[i],
+                          first = 20,
+                          last = 20)
+    
+    #The dilution factor is extracted from the meta-data data-sheet in the root-folder
+    flask_dil <- expt.meta[expt.meta$Flask == num_flask,
+                           names(expt.meta) == dil_name]
+    
+    #Relative time from beginning of experiment is extracted
+    flask_time <- expt.meta[expt.meta$Flask == num_flask,
+                           names(expt.meta) == time_name]
+    
+    medium <- expt.meta[expt.meta$Flask == num_flask,"Medium"]
+    
+    #The .csv file is loaded here, and extra columns are added with the additional meta-data required for the data-processing
+    file.name <- paste(current_folder,"/",list.files(current_folder)[i],sep = "")
+    
+    vec <- read.csv(file.name) %>% 
+      mutate(Flask = name_flask,
+             replicate = expt_rep,
+             Meso = Meso_designation,
+             Prey = prey_designation,
+             Day = as.numeric(substring(expt.day[dir_idx],2)))
+    
+    #Because the flow-cam keeps counting the seconds when resetting the pump, a constant is multiplied to the Elapsed time to get the correct volume aspirated. This constant however was calculated from using the 0.5 ml pump, so a new value is probably needed for the 1 ml pump.
+    Asp.vol <- (max(vec$Elapsed.Time*0.967)/60)*0.150
+    
+    #R-vector containing the raw data-set with both Mesodinium and Crypotphyte data
+    vec.raw <- vec
+    
+    Meso_filter <- vec.raw$Class == "Mesodinium"
+    
+    #Creating an R-vector that only contains the data classified as Mesodinium
+    vec <- vec.raw[Meso_filter,]
+    
+    #Creating an R-vector that only contains the data classified as Cryptophyte (or rather it only contains data that has not been classified as Meosdinium)
+    vec2 <- vec.raw[!Meso_filter,]
+    
+    #On the first sample of each experimental day, an empty spreadsheet is created for both Prey and Mesodinium. This will be populated as the for-loop iterates through each sample.
+    if(i == 1){
+      FCDP_meso <- vec
+      FCDP_prey <- vec2
+      
+      #Creating data-frame for partitioned data results
+      All.Results <- as.data.frame(1:length(list.files(current_folder)))
+      
+      colnames(All.Results) <- c("Flask")     # Columns 1-8: Metadata
+      All.Results$Day <- NaN
+      All.Results$Time <- NaN                 
+      All.Results$Dilution <- NaN             
+      All.Results$Aspirated.vol <- NaN        
+      All.Results$Meso <- NaN                 
+      All.Results$Prey <- NaN                 
+      All.Results$Replicate <- NaN            
+      All.Results$Medium <- NaN               
+      All.Results$M.Red <- NaN               # Columns 10-16; from Res$counts
+      All.Results$M.Blue <- NaN              
+      All.Results$M.Undefined <- NaN         
+      All.Results$M.Nonfluorescent <- NaN
+      All.Results$M.TotRed <- NaN
+      All.Results$M.TotBlue <- NaN
+      All.Results$TotalMeso <- NaN          
+      All.Results$M.Red.meanCh1peak <- NaN               # Columns 17-20; from Res$Ch1.peaks
+      All.Results$M.Blue.meanCh1peak <- NaN              
+      All.Results$M.Undefined.meanCh1peak <- NaN         
+      All.Results$M.Nonfluorescent.meanCh1peak <- NaN
+      All.Results$M.Red.sdCh1peak <- NaN               # Columns 21-24; from Res$Ch1.sds
+      All.Results$M.Blue.sdCh1peak <- NaN              
+      All.Results$M.Undefined.sdCh1peak <- NaN         
+      All.Results$M.Nonfluorescent.sdCh1peak <- NaN
+      All.Results$M.Red.meanCh2peak <- NaN               # Columns 25-28; from Res$Ch2.peaks
+      All.Results$M.Blue.meanCh2peak <- NaN              
+      All.Results$M.Undefined.meanCh2peak <- NaN         
+      All.Results$M.Nonfluorescent.meanCh2peak <- NaN  
+      All.Results$M.Red.sdCh2peak <- NaN               # Columns 29-32; from Res$Ch2.sds
+      All.Results$M.Blue.sdCh2peak <- NaN              
+      All.Results$M.Undefined.sdCh2peak <- NaN         
+      All.Results$M.Nonfluorescent.sdCh2peak <- NaN  
+      
+      #Adding columns for cryptophytes
+      All.Results$C.Red <- NaN               # Columns 9-15; from Res$counts
+      All.Results$C.Blue <- NaN              
+      All.Results$C.Undefined <- NaN         
+      All.Results$C.Nonfluorescent <- NaN
+      All.Results$C.TotRed <- NaN
+      All.Results$C.TotBlue <- NaN
+      All.Results$TotalCrypto <- NaN          
+      All.Results$C.Red.meanCh1peak <- NaN               # Columns 16-19; from Res$Ch1.peaks
+      All.Results$C.Blue.meanCh1peak <- NaN              
+      All.Results$C.Undefined.meanCh1peak <- NaN         
+      All.Results$C.Nonfluorescent.meanCh1peak <- NaN
+      All.Results$C.Red.sdCh1peak <- NaN               # Columns 20-23; from Res$Ch1.sds
+      All.Results$C.Blue.sdCh1peak <- NaN              
+      All.Results$C.Undefined.sdCh1peak <- NaN         
+      All.Results$C.Nonfluorescent.sdCh1peak <- NaN
+      All.Results$C.Red.meanCh2peak <- NaN               # Columns 24-27; from Res$Ch2.peaks
+      All.Results$C.Blue.meanCh2peak <- NaN              
+      All.Results$C.Undefined.meanCh2peak <- NaN         
+      All.Results$C.Nonfluorescent.meanCh2peak <- NaN  
+      All.Results$C.Red.sdCh2peak <- NaN               # Columns 28-31; from Res$Ch2.sds
+      All.Results$C.Blue.sdCh2peak <- NaN              
+      All.Results$C.Undefined.sdCh2peak <- NaN         
+      All.Results$C.Nonfluorescent.sdCh2peak <- NaN  
+      
+    } else{
+      FCDP_prey <- rbind(FCDP_prey,vec2)
+      FCDP_meso <- rbind(FCDP_meso,vec)
+    }
+    
+    # Add relevant data for this sample
+    All.Results$Flask[i] <- name_flask
+    All.Results$Day[i] <- today
+    All.Results$Time[i] <- flask_time
+    All.Results$Dilution[i] <- flask_dil
+    All.Results$Aspirated.vol[i] <- round(Asp.vol,3)
+    All.Results$Meso[i] <- Meso_designation
+    All.Results$Prey[i] <- prey_designation
+    All.Results$Replicate[i] <- expt_rep
+    All.Results$Medium[i] <- medium
+    
+    #Running the partitioning function for Mesodinium
+
+    if(dim(vec)[1] > 0){ # If there are Mesodinium in the dataset
+      Res <- Meso.flowPeaks(vec,name_flask,today,create_plot = create_plot_meso,unknown.partition = unk.part.Meso, bluegreen.partition = bg.part.Meso)
+      #Assigning partitioned data for Mesodinium
+      All.Results[i,10:16] <- Res$counts
+      All.Results[i,17:20] <- Res$Ch1.peaks
+      All.Results[i,21:24] <- Res$Ch1.peaks.sd
+      All.Results[i,25:28] <- Res$Ch2.peaks
+      All.Results[i,29:32] <- Res$Ch2.peaks.sd
+    }
+    
+    if(dim(vec2)[1] > 0){ # If there are cryptophytes in the dataset
+      #Running flowPeaks for Prey
+      Res.crypto <- Meso.flowPeaks(vec2,name_flask,today,create_plot = create_plot_prey,unknown.partition = unk.part.prey, bluegreen.partition = bg.part.prey)
+      #Assigning partitioned data for Prey
+      All.Results[i,33:39] <- Res.crypto$counts
+      All.Results[i,40:43] <- Res.crypto$Ch1.peaks
+      All.Results[i,44:47] <- Res.crypto$Ch1.peaks.sd
+      All.Results[i,48:51] <- Res.crypto$Ch2.peaks
+      All.Results[i,52:55] <- Res.crypto$Ch2.peaks.sd
+    }
+    
+    if(i == length(list.files(current_folder))){
+        FCDP_prey <- FCDP_prey %>% mutate(Partition = "Prey")
+        FCDP_meso <- FCDP_meso %>% mutate(Partition = "Mesodinium")
+        FCDP_all <- rbind(FCDP_meso,FCDP_prey)
+      
+      
+      Res_name <- paste(CSV_folder,"/Summary_",expt.day[dir_idx],".csv",sep = "")
+      FCDP_name <- paste(CSV_folder,"/FCDP_all_",expt.day[dir_idx],".csv",sep = "")
+      
+      write.csv(All.Results,Res_name,row.names = F)
+      write.csv(FCDP_all,FCDP_name,row.names = F)
+    }
+  }
+  
+  if(dir_idx == 1){
+    All.Results.Concat <- All.Results
+  } else{
+    All.Results.Concat <- rbind(All.Results.Concat, All.Results)
+  }
+  
+  if(dir_idx == length(Folder_list)){
+    All_res_name <- paste("All_Summary",".csv",sep='')
+    write.csv(All.Results.Concat,All_res_name,row.names = F)
+  }
+  
+}
+
+
+```
+
+### Calculate population sizes
+```{r}
+ARC <- All.Results.Concat # Shortening the variable name
+
+# Something strange happened with the first Aspirated Volume measurement that I don't understand. But based on the cryptophyte numbers, the volume should be more similar to the other aspiration volumes than the 0.199 that the datasheet recorded.
+ARC$Aspirated.vol[1] <- mean(ARC$Aspirated.vol[2:29])
+
+# Calculating concentrations of cells (in cells per mL), normalizing to the aspirated volume and adjusting for dilution
+ARC$M.pmL <- ARC$TotalMeso/ARC$Aspirated.vol*ARC$Dilu
+ARC$M.pmL.red <- ARC$M.TotRed/ARC$Aspirated.vol*ARC$Dilu
+ARC$M.pmL.blue <- ARC$M.TotBlue/ARC$Aspirated.vol*ARC$Dilu
+
+ARC$C.pmL <- ARC$TotalCrypto/ARC$Aspirated.vol*ARC$Dilu
+ARC$C.pmL.red <- ARC$C.TotRed/ARC$Aspirated.vol*ARC$Dilu
+ARC$C.pmL.blue <- ARC$C.TotBlue/ARC$Aspirated.vol*ARC$Dilu
+
+# Calculating proportion of blue-green cryptophytes
+ARC$C.propblue <- ARC$C.pmL.blue/ARC$C.pmL
+
+# Rounding day to whole number so that we can group by timepoint in downstream calculations
+ARC$Day.Numeric <- round(ARC$Time,digits=0)
+
+```
+
+### Plot cryptophyte population dynamics
+```{r, fig.height=5, fig.width=5}
+par(mar=c(4,4,1,1),mfrow=c(2,2))
+
+# Panel 1: All cryptophytes
+plot(jitter(ARC$Day.Numeric,.2),ARC$C.pmL/1000,las=1,xlab='Time (days)',ylab='Cryptophytes (1000s of cells/mL)',pch=21,bg=c(Bothcol.bg,'white')[as.factor(ARC$Meso)],col=Bothcol,cex=1.5)
+legend(x='topleft',inset=c(0.03,0.03),legend=c('Control','+ M. rubrum'),pch=21,pt.cex=1.5,pt.bg=c(Bothcol,'white'))
+
+Summ.Prey <- summarySE(data=ARC, 'C.pmL', groupvars=c('Day.Numeric','Meso'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL/1000+Summ.Prey$se/1000,Summ.Prey$Day.Numeric,Summ.Prey$C.pmL/1000-Summ.Prey$se/1000,code=3,angle=90,length=.02)
+points(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL/1000,pch=21,cex=1.5,bg=c(Bothcol,'white')[as.factor(Summ.Prey$Meso)])
+
+# Panel 2: Teleaulax
+plot(jitter(ARC$Day.Numeric,.2),ARC$C.pmL.red/1000,las=1,xlab='Time (days)',ylab='T. amphioxeia (1000s of cells/mL)',pch=21,bg=c(TAcol.bg,'white')[as.factor(ARC$Meso)],col=TAcol,cex=1.5)
+legend(x='topleft',inset=c(0.03,0.03),legend=c('Control','+ M. rubrum'),pch=21,pt.cex=1.5,pt.bg=c(TAcol,'white'))
+
+Summ.Prey <- summarySE(data=ARC, 'C.pmL.red', groupvars=c('Day.Numeric','Meso'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.red/1000+Summ.Prey$se/1000,Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.red/1000-Summ.Prey$se/1000,code=3,angle=90,length=.02)
+points(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.red/1000,pch=21,cex=1.5,bg=c(TAcol,'white')[as.factor(Summ.Prey$Meso)])
+
+# Panel 3: Hemiselmis
+plot(jitter(ARC$Day.Numeric,.2),ARC$C.pmL.blue/1000,las=1,xlab='Time (days)',ylab='H. pacifica (1000s of cells/mL)',pch=21,bg=c(HPcol.bg,'white')[as.factor(ARC$Meso)],col=HPcol,cex=1.5)
+legend(x='topleft',inset=c(0.03,0.03),legend=c('Control','+ M. rubrum'),pch=21,pt.cex=1.5,pt.bg=c(HPcol,'white'))
+
+Summ.Prey <- summarySE(data=ARC, 'C.pmL.blue', groupvars=c('Day.Numeric','Meso'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.blue/1000+Summ.Prey$se/1000,Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.blue/1000-Summ.Prey$se/1000,code=3,angle=90,length=.02)
+points(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.blue/1000,pch=21,cex=1.5,bg=c(HPcol,'white')[as.factor(Summ.Prey$Meso)])
+
+
+# Panel 4: Proportion Hemiselmis
+plot(jitter(ARC$Day.Numeric,.2),ARC$C.propblue,las=1,xlab='Time (days)',ylab='Proportion H. pacifica',pch=21,bg=c(Bothcol.bg,'white')[as.factor(ARC$Meso)],col=Bothcol,cex=1.5)
+legend(x='topright',inset=c(0.03,0.03),legend=c('Control','+ M. rubrum'),pch=21,pt.cex=1.5,pt.bg=c(Bothcol,'white'))
+
+Summ.Prey <- summarySE(data=ARC, 'C.propblue', groupvars=c('Day.Numeric','Meso'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$C.propblue+Summ.Prey$se,Summ.Prey$Day.Numeric,Summ.Prey$C.propblue-Summ.Prey$se,code=3,angle=90,length=.02)
+points(Summ.Prey$Day.Numeric,Summ.Prey$C.propblue,pch=21,cex=1.5,bg=c(Bothcol,'white')[as.factor(Summ.Prey$Meso)])
+
+```
+
+### Calculate ingestion rates and test for preferential grazing
+
+We'll follow Jeong & Latz 1994 and calculate ingestion rates based on the growth rates of prey in the absence and presence of predator. To perform this calculation, we'll need estimates of the growth rates for all species in all flasks.
+
+```{r, fig.height=3,fig.width=8}
+
+par(mar=c(4,4,1,1),mfrow=c(1,3))
+summ.dat <- as.data.frame(unique(ARC$Flask))
+colnames(summ.dat) <- 'Flask'
+summ.dat$Meso <- ARC$Meso[match(summ.dat$Flask,ARC$Flask)]
+summ.dat$Prey <- ARC$Prey[match(summ.dat$Flask,ARC$Flask)]
+summ.dat$Replicate <- ARC$Replicate[match(summ.dat$Flask,ARC$Flask)]
+summ.dat$TA.mu <- NaN
+summ.dat$HP.mu <- NaN
+summ.dat$MR.mu <- NaN
+
+datewindow <- c(1:4)
+
+for(i in 1:dim(summ.dat)[1]){
+  FlaskID <- summ.dat$Flask[i]
+  subdat <- ARC[ARC$Flask==summ.dat$Flask[i],]
+  
+  # TA growth curve
+  plot(subdat$Time,subdat$C.pmL.red/1000,col=TAcol,pch=21,bg=TAcol.bg,log='y',xlab='Time (days)',ylab=expression(paste(italic('T. amphioxeia'),' (',10^3,' cells m',L^-1,')')),las=1)
+  lmTA <- lm(log(subdat$C.pmL.red)[datewindow]~subdat$Time[datewindow])
+  summ.dat$TA.mu[i] <- summary(lmTA)$coefficients[2,1]
+  xcoords <- seq(from = min(subdat$Time,na.rm = T), to = max(subdat$Time,na.rm = T), length.out=50)
+  ycoords <- exp(summary(lmTA)$coefficients[1,1])*exp(summ.dat$TA.mu[i]*xcoords)
+  lines(xcoords,ycoords/1000)
+  
+  # HP growth curve
+  plot(subdat$Time,subdat$C.pmL.blue/1000,col=HPcol,pch=21,bg=HPcol.bg,log='y',xlab='Time (days)',ylab=expression(paste(italic('H.pacifica'),' (',10^3,' cells m',L^-1,')')),las=1)
+  lmHP <- lm(log(subdat$C.pmL.blue)[datewindow]~subdat$Time[datewindow])
+  summ.dat$HP.mu[i] <- summary(lmHP)$coefficients[2,1]
+  ycoords <- exp(summary(lmHP)$coefficients[1,1])*exp(summ.dat$HP.mu[i]*xcoords)
+  lines(xcoords,ycoords/1000)
+  
+  # MR growth curve
+  if(subdat$Meso[1]=='0000'){
+    plot(1,1,type='n',bty='n',xaxt='n',yaxt='n',xlab='',ylab='')
+  } else{
+  plot(subdat$Time,subdat$M.pmL/1000,col=Bothcol,pch=21,bg=Bothcol.bg,log='y',xlab='Time (days)',ylab=expression(paste(italic('M. rubrum'),' (',10^3,' cells m',L^-1,')')),las=1)
+  lmMR <- lm(log(subdat$M.pmL)[datewindow]~subdat$Time[datewindow])
+  summ.dat$MR.mu[i] <- summary(lmMR)$coefficients[2,1]
+  ycoords <- exp(summary(lmMR)$coefficients[1,1])*exp(summ.dat$MR.mu[i]*xcoords)
+  lines(xcoords,ycoords/1000)
+  }
+  
+  
+}
+
+```
+
+Now, we'll match the prey control (predator-free) growth rates by replicate:
+
+```{r}
+summ.dat.ctrl <- summ.dat[summ.dat$Meso=='0000',]
+summ.dat$ctrl.TA.mu <- summ.dat.ctrl$TA.mu[match(summ.dat$Replicate,summ.dat.ctrl$Replicate)]
+summ.dat$ctrl.HP.mu <- summ.dat.ctrl$HP.mu[match(summ.dat$Replicate,summ.dat.ctrl$Replicate)]
+
+```
+
+The grazing rate, $g$, is the difference between the growth rate in the absence of the predator and the growth rate in the presence of the predator. It has units of per day: 
+
+```{r}
+summ.dat$g.TA <- summ.dat$ctrl.TA.mu-summ.dat$TA.mu
+summ.dat$g.HP <- summ.dat$ctrl.HP.mu-summ.dat$HP.mu
+```
+
+To determine the ingestion rate, we also need to know the mean population sizes of both predators and prey. To determine this, we first match the population sizes at the start of the experiment.
+
+```{r}
+summ.dat$TA.d0 <- ARC[ARC$Day.Numeric==0,]$C.pmL.red
+summ.dat$HP.d0 <- ARC[ARC$Day.Numeric==0,]$C.pmL.blue
+summ.dat$MR.d0 <- ARC[ARC$Day.Numeric==0,]$M.pmL
+```
+
+Next, we assume exponential growth, and solve for the mean population size:
+
+```{r}
+summ.dat$TA.pop.72 <- summ.dat$TA.d0*(exp(summ.dat$TA.mu*3)-1) / (3 * summ.dat$TA.mu)
+summ.dat$HP.pop.72 <- summ.dat$HP.d0*(exp(summ.dat$HP.mu*3)-1) / (3 * summ.dat$HP.mu)
+summ.dat$MR.pop.72 <- summ.dat$MR.d0*(exp(summ.dat$MR.mu*3)-1) / (3 * summ.dat$MR.mu)
+```
+
+Finally, we can compute the ingestion rate: the number of cryptophytes consumed per Mesodinium per day:
+
+```{r}
+summ.dat$i.TA <- summ.dat$g.TA*summ.dat$TA.pop.72/summ.dat$MR.pop.72
+summ.dat$i.HP <- summ.dat$g.HP*summ.dat$HP.pop.72/summ.dat$MR.pop.72
+```
+
+And the attack rate: the volume of water (in uL) filtered per each M. rubrum cell per day
+
+```{r}
+summ.dat$a.TA <- summ.dat$g.TA/summ.dat$MR.pop.72*1000
+summ.dat$a.HP <- summ.dat$g.HP/summ.dat$MR.pop.72*1000
+```
+
+We can perform a statistical test to see whether the attack rates differ by prey type:
+
+```{r}
+t.test(summ.dat[summ.dat$Meso=='MRTA',]$a.TA,summ.dat[summ.dat$Meso=='MRTA',]$a.HP)
+```
+The p-value is 0.9292, which is much greater than 0.05. This means that, according to our experimental results and within the limits of statistical power set by our design, the attack rates are not significantly different from one another.
+
+### Manuscript figure:
+Top row: timeseries of population sizes and ratio
+Bottom row: barplots of growth rate, mean population size, ingestion rate, and attack rate
+
+```{r}
+t.test(summ.dat[summ.dat$Meso=='0000',]$TA.mu,summ.dat[summ.dat$Meso=='0000',]$HP.mu) # p = 0.3728
+t.test(summ.dat[summ.dat$Meso=='MRTA',]$TA.pop.72,summ.dat[summ.dat$Meso=='MRTA',]$HP.pop.72) # p = 0.003637
+t.test(summ.dat[summ.dat$Meso=='MRTA',]$i.TA,summ.dat[summ.dat$Meso=='MRTA',]$i.HP) # p = 0.05589
+t.test(summ.dat[summ.dat$Meso=='MRTA',]$a.TA,summ.dat[summ.dat$Meso=='MRTA',]$a.HP) # p = 0.9292
+```
+
+```{r,fig.height=6*.8,fig.width=8.5*.8}
+
+pointcolor <- 'gray50'
+pointcolor.bg <- 'gray80'
+
+layout(matrix(data=c(1,1,2,2,3,4,5,6),nrow=2,ncol=4,byrow=T))
+par(mar=c(4,4.5,1,1))
+
+# Panel 1: Population dynamics
+axlabcex <- 0.7
+plot(jitter(ARC$Day.Numeric,.2),ARC$C.pmL.red/1000,las=1,xlab='',ylab='',pch=21,bg=c('white',pointcolor.bg)[as.factor(ARC$Meso)],col=pointcolor.bg,cex=1.5,log='y',ylim=c(1,50)) # ,type='n'
+points(jitter(ARC$Day.Numeric,.2),ARC$C.pmL.blue/1000,pch=22,bg=c('white',pointcolor.bg)[as.factor(ARC$Meso)],col=pointcolor.bg,cex=1.5)
+text(0,45,'(A)')
+legend(x='topleft',inset=c(0.01,0.08),legend=c(expression(paste(italic('H. pac.'),' + ',italic('M. rubrum'))),expression(paste(italic('T. amph.'),' + ',italic('M. rubrum'))),expression(paste(italic('H. pac.'),' control')),expression(paste(italic('T. amph.'),' control'))),pch=c(22,21,22,21),pt.cex=1.5,pt.bg=c('black','black','white','white'),bty='n')
+mtext(expression(paste('Cryptophyte population size')),side=2,line=3.4,cex=axlabcex)
+mtext(expression(paste('(',10^3,' cells · ',mL^-1,')')),side=2,line=2,cex=axlabcex)
+mtext('Time (d)',side=1,cex=axlabcex,line=2.3)
+
+# Add Teleaulax points
+Summ.Prey <- summarySE(data=ARC, 'C.pmL.red', groupvars=c('Day.Numeric','Meso'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.red/1000+Summ.Prey$se/1000,Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.red/1000-Summ.Prey$se/1000,code=3,angle=90,length=.02)
+lines(Summ.Prey[Summ.Prey$Meso=='0000',]$Day.Numeric,Summ.Prey[Summ.Prey$Meso=='0000',]$C.pmL.red/1000,lty=2)
+lines(Summ.Prey[Summ.Prey$Meso=='MRTA',]$Day.Numeric,Summ.Prey[Summ.Prey$Meso=='MRTA',]$C.pmL.red/1000,lty=1)
+points(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.red/1000,pch=21,cex=1.5,bg=c('white','black')[as.factor(Summ.Prey$Meso)])
+
+# Add Hemiselmis points
+Summ.Prey <- summarySE(data=ARC, 'C.pmL.blue', groupvars=c('Day.Numeric','Meso'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.blue/1000+Summ.Prey$se/1000,Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.blue/1000-Summ.Prey$se/1000,code=3,angle=90,length=.02)
+lines(Summ.Prey[Summ.Prey$Meso=='0000',]$Day.Numeric,Summ.Prey[Summ.Prey$Meso=='0000',]$C.pmL.blue/1000,lty=2)
+lines(Summ.Prey[Summ.Prey$Meso=='MRTA',]$Day.Numeric,Summ.Prey[Summ.Prey$Meso=='MRTA',]$C.pmL.blue/1000,lty=1)
+points(Summ.Prey$Day.Numeric,Summ.Prey$C.pmL.blue/1000,pch=22,cex=1.5,bg=c('white','black')[as.factor(Summ.Prey$Meso)])
+
+
+# Panel 2: Ratio
+plot(jitter(ARC$Day.Numeric,.2),ARC$C.propblue,las=1,xlab='',ylab=expression(paste('Proportion ',italic('H. pacifica'))),pch=21,bg=c('white',pointcolor.bg)[as.factor(ARC$Meso)],col=pointcolor.bg,cex=1.5,ylim=c(0.2,0.4))
+legend(x='topright',inset=c(0.03,0.03),legend=c(expression(paste('+ ',italic('M. rubrum'))),'Control'),pch=21,pt.cex=1.5,pt.bg=c('black','white'),bty='n')
+mtext('Time (d)',side=1,cex=axlabcex,line=2.3)
+text(0,.395,'(B)')
+
+Summ.Prey <- summarySE(data=ARC, 'C.propblue', groupvars=c('Day.Numeric','Meso'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$C.propblue+Summ.Prey$se,Summ.Prey$Day.Numeric,Summ.Prey$C.propblue-Summ.Prey$se,code=3,angle=90,length=.02)
+lines(Summ.Prey[Summ.Prey$Meso=='0000',]$Day.Numeric,Summ.Prey[Summ.Prey$Meso=='0000',]$C.propblue,lty=2)
+lines(Summ.Prey[Summ.Prey$Meso=='MRTA',]$Day.Numeric,Summ.Prey[Summ.Prey$Meso=='MRTA',]$C.propblue,lty=1)
+points(Summ.Prey$Day.Numeric,Summ.Prey$C.propblue,pch=21,cex=1.5,bg=c('white','black')[as.factor(Summ.Prey$Meso)])
+
+
+
+
+# Row 2: barplots
+names2use <- c(expression(paste(italic('H. pac.'))),expression(paste(italic('T. amph.'))))
+par(mar=c(6,4,1,1))
+HPcol.bg <- 'gray70'
+TAcol.bg <- 'white'
+
+# Plot 1: Growth rates
+growths <- as.data.frame(cbind(rep(c('TA','HP'),each=3),c(summ.dat[summ.dat$Meso=='0000',]$TA.mu,summ.dat[summ.dat$Meso=='0000',]$HP.mu)))
+colnames(growths) <- c('Cryptophyte','GrowthRate')
+growths$GrowthRate <- as.numeric(as.character(growths$GrowthRate))
+bargraph.CI(Cryptophyte,GrowthRate,data=growths,las=1,xlab='',names=names2use,ylab='',col=c(HPcol.bg,TAcol.bg),space=0.1,ylim=c(0,.825))
+mtext(expression(paste('Cryptophyte growth rate (',d^-1,')')),side=2,line=2.5,cex=axlabcex)
+text(0.25,.795,'(C)')
+
+# Plot 2: Population sizes
+sizes <- as.data.frame(cbind(rep(c('TA','HP'),each=3),c(summ.dat[summ.dat$Meso=='MRTA',]$TA.pop.72,summ.dat[summ.dat$Meso=='MRTA',]$HP.pop.72)))
+colnames(sizes) <- c('Cryptophyte','PopSize')
+sizes$PopSize <- as.numeric(as.character(sizes$PopSize))
+bargraph.CI(Cryptophyte,PopSize,data=sizes,las=1,xlab='',names=names2use,ylab='',col=c(HPcol.bg,TAcol.bg),space=.1,ylim=c(0,4500))
+text(1.15,4400,'**',cex=1.5)
+mtext('Cryptophyte prey species',side=1,line=2.3,cex = axlabcex,at=3)
+mtext(expression(paste('Mean popn. size (cells · ',mL^-1,')')),side=2,line=3,cex=axlabcex)
+text(0.25,4300,'(D)')
+
+# Plot 3: Ingestion rates
+ingests <- as.data.frame(cbind(rep(c('TA','HP'),each=3),c(summ.dat[summ.dat$Meso=='MRTA',]$i.TA,summ.dat[summ.dat$Meso=='MRTA',]$i.HP)))
+colnames(ingests) <- c('Cryptophyte','IngestRate')
+ingests$IngestRate <- as.numeric(as.character(ingests$IngestRate))
+bargraph.CI(Cryptophyte,IngestRate,data=ingests,las=1,xlab='',names=names2use,ylab='',col=c(HPcol.bg,TAcol.bg),space=.1,ylim=c(0,1.75))
+mtext(expression(paste('Ingestion (prey · ',italic('M. rub.')^-1,' · ',d^-1,')')),side=2,line=2.5,cex=axlabcex)
+text(0.25,1.66,'(E)')
+
+# Plot 4: Attack rates
+attacks <- as.data.frame(cbind(rep(c('TA','HP'),each=3),c(summ.dat[summ.dat$Meso=='MRTA',]$a.TA,summ.dat[summ.dat$Meso=='MRTA',]$a.HP)))
+colnames(attacks) <- c('Cryptophyte','AttackRate')
+attacks$AttackRate <- as.numeric(as.character(attacks$AttackRate))
+bargraph.CI(Cryptophyte,AttackRate,data=attacks,las=1,xlab='',names=names2use,ylab='',col=c(HPcol.bg,TAcol.bg),space=.1,ylim=c(0,.45))
+mtext(expression(paste('Clearance rate (μL · ',italic('M. rub.')^-1,' · ',d^-1,')')),side=2,line=2.5,cex=axlabcex)
+text(0.2,.43,'(F)')
+```
+
+
+
+# Experiment 3: Long-term feeding
+
+### FlowCam data analysis
+```{r}
+#Enter the location of your main folder for the current experiment.
+#Alter this line to refer to the file location where the excel sheet is.
+root_folder <- "/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/LongTermExpt/FlowCam/DataFiles"
+
+#In the main folder create a folder name CSV_files, if named other wise change "/CSV_files" accordingly
+CSV_folder <- paste(root_folder,"/CSV_files",sep = "")
+
+#List the sub-folders of the current experiment, this would usually be one folder for each sampling day.
+Folder_list <- c("D0","D1","D2","D3","D5","D7","D10","D12","D14","D16","D18","D20","D22")
+#Folder_list <- c("D7")
+
+expt.day <- Folder_list
+
+knitr::opts_knit$set(root.dir = root_folder)
+
+#A .csv file should be created with extra meta-data, such as data for sampling time and dilution. If other data is acquired, such as pigment extractions, include these in the this file as well.
+expt.meta <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/LongTermExpt/FlowCam/Mrubrum_fedHP_FunctionalResponseCurves - LT_DilTime.csv")
+```
+
+```{r,fig.height=8,fig.width=8}
+#Using the previously defined Folder_list, a for loop is created to access each folder one at a time, and within those folder each sample is then accessed one at a time.
+#Each data set is being processed using the MRMC.partitioning function, which distinguished Red Chloroplast MC from blue-green Chloroplast MC. By using the meta-data stored in the file-name a new data-sheet is created with the desired data where each row is from a single sample from a single day.
+
+create_plot_meso = F #If TRUE, the partitioning will output partitioned Ch1 vs Ch2 plots -- MESODINIUM VERSION
+create_plot_prey = F #If TRUE, the partitioning will output partitioned Ch1 vs Ch2 plots -- PREY VERSION
+
+unk.part.Meso = 5.5 # unknown partition for Mesodinium
+bg.part.Meso = 4.5 # blue-green partition for Mesodinium
+unk.part.prey = 0 # unknown partition for cryptophytes
+bg.part.prey = 4.5 # blue-green partition for cryptophytes
+
+#The first for-loop is created to open the folder of the individual sampling day in the order as they were defined (usually chronologically)
+for(dir_idx in 1:length(Folder_list)){
+  
+  #The working directory is set to the folder containing one days worth of data.
+  current_folder <- paste(root_folder,"/",Folder_list[dir_idx],sep = "")
+  
+  #Recording the current experimental day
+  today <- expt.day[dir_idx]
+  
+  #here the columns to retrieve timestamp and dilution is defined.
+  dil_name <- paste("Dil.",today,sep = "")
+  time_name <- paste("TS.",today,sep = "")
+  
+  #The function list.files(current_folder), will create a list of files that are located in the folder, and by using this list of files, a new for-loop is created accessing each file consecutively.
+  for(i in 1:length(list.files(current_folder))){
+    
+    #extracting meta data from the file name
+    #Characters 1 to 7 is the Flask index
+    name_flask <- substring(list.files(current_folder)[i],
+                            first = 1,
+                            last = 7)
+    
+    #assigning flask index as a number
+    num_flask <- as.integer(substring(list.files(current_folder)[i],
+                                      first = 6,
+                                      last = 7))
+    
+    #Characters 9 to 12 is the Mesodinium pre-experiment plastid type
+    Meso_designation <- substring(list.files(current_folder)[i],
+                                  first = 9,
+                                  last = 12)
+    
+    #Characters 14 through 18 indicate the prey being fed during the experiment
+    prey_designation <- substring(list.files(current_folder)[i],
+                                  first = 14,
+                                  last = 15)
+    
+    #Character 20 is the replicate indicator
+    expt_rep <- substring(list.files(current_folder)[i],
+                          first = 20,
+                          last = 20)
+    
+    #The dilution factor is extracted from the meta-data data-sheet in the root-folder
+    flask_dil <- expt.meta[expt.meta$Flask == num_flask,
+                           names(expt.meta) == dil_name]
+    
+    #Relative time from beginning of experiment is extracted
+    flask_time <- expt.meta[expt.meta$Flask == num_flask,
+                           names(expt.meta) == time_name]
+    
+    medium <- expt.meta[expt.meta$Flask == num_flask,"Medium"]
+    
+    #The .csv file is loaded here, and extra columns are added with the additional meta-data required for the data-processing
+    file.name <- paste(current_folder,"/",list.files(current_folder)[i],sep = "")
+    
+    vec <- read.csv(file.name) %>% 
+      mutate(Flask = name_flask,
+             replicate = expt_rep,
+             Meso = Meso_designation,
+             Prey = prey_designation,
+             Day = as.numeric(substring(expt.day[dir_idx],2)))
+    
+    #Because the flow-cam keeps counting the seconds when resetting the pump, a constant is multiplied to the Elapsed time to get the correct volume aspirated. This constant however was calculated from using the 0.5 ml pump, so a new value is probably needed for the 1 ml pump.
+    Asp.vol <- (max(vec$Elapsed.Time*0.967)/60)*0.150
+    
+    #R-vector containing the raw data-set with both Mesodinium and Crypotphyte data
+    vec.raw <- vec
+    
+    Meso_filter <- vec.raw$Class == "Mesodinium"
+    
+    #Creating an R-vector that only contains the data classified as Mesodinium
+    vec <- vec.raw[Meso_filter,]
+    
+    #Creating an R-vector that only contains the data classified as Cryptophyte (or rather it only contains data that has not been classified as Meosdinium)
+    vec2 <- vec.raw[!Meso_filter,]
+    
+    #On the first sample of each experimental day, an empty spreadsheet is created for both Prey and Mesodinium. This will be populated as the for-loop iterates through each sample.
+    if(i == 1){
+      FCDP_meso <- vec
+      FCDP_prey <- vec2
+      
+      #Creating data-frame for partitioned data results
+      All.Results <- as.data.frame(1:length(list.files(current_folder)))
+      
+      colnames(All.Results) <- c("Flask")     # Columns 1-8: Metadata
+      All.Results$Day <- NaN
+      All.Results$Time <- NaN                 
+      All.Results$Dilution <- NaN             
+      All.Results$Aspirated.vol <- NaN        
+      All.Results$Meso <- NaN                 
+      All.Results$Prey <- NaN                 
+      All.Results$Replicate <- NaN            
+      All.Results$Medium <- NaN               
+      All.Results$M.Red <- NaN               # Columns 10-16; from Res$counts
+      All.Results$M.Blue <- NaN              
+      All.Results$M.Undefined <- NaN         
+      All.Results$M.Nonfluorescent <- NaN
+      All.Results$M.TotRed <- NaN
+      All.Results$M.TotBlue <- NaN
+      All.Results$TotalMeso <- NaN          
+      All.Results$M.Red.meanCh1peak <- NaN               # Columns 17-20; from Res$Ch1.peaks
+      All.Results$M.Blue.meanCh1peak <- NaN              
+      All.Results$M.Undefined.meanCh1peak <- NaN         
+      All.Results$M.Nonfluorescent.meanCh1peak <- NaN
+      All.Results$M.Red.sdCh1peak <- NaN               # Columns 21-24; from Res$Ch1.sds
+      All.Results$M.Blue.sdCh1peak <- NaN              
+      All.Results$M.Undefined.sdCh1peak <- NaN         
+      All.Results$M.Nonfluorescent.sdCh1peak <- NaN
+      All.Results$M.Red.meanCh2peak <- NaN               # Columns 25-28; from Res$Ch2.peaks
+      All.Results$M.Blue.meanCh2peak <- NaN              
+      All.Results$M.Undefined.meanCh2peak <- NaN         
+      All.Results$M.Nonfluorescent.meanCh2peak <- NaN  
+      All.Results$M.Red.sdCh2peak <- NaN               # Columns 29-32; from Res$Ch2.sds
+      All.Results$M.Blue.sdCh2peak <- NaN              
+      All.Results$M.Undefined.sdCh2peak <- NaN         
+      All.Results$M.Nonfluorescent.sdCh2peak <- NaN  
+      
+      #Adding columns for cryptophytes
+      All.Results$C.Red <- NaN               # Columns 9-15; from Res$counts
+      All.Results$C.Blue <- NaN              
+      All.Results$C.Undefined <- NaN         
+      All.Results$C.Nonfluorescent <- NaN
+      All.Results$C.TotRed <- NaN
+      All.Results$C.TotBlue <- NaN
+      All.Results$TotalCrypto <- NaN          
+      All.Results$C.Red.meanCh1peak <- NaN               # Columns 16-19; from Res$Ch1.peaks
+      All.Results$C.Blue.meanCh1peak <- NaN              
+      All.Results$C.Undefined.meanCh1peak <- NaN         
+      All.Results$C.Nonfluorescent.meanCh1peak <- NaN
+      All.Results$C.Red.sdCh1peak <- NaN               # Columns 20-23; from Res$Ch1.sds
+      All.Results$C.Blue.sdCh1peak <- NaN              
+      All.Results$C.Undefined.sdCh1peak <- NaN         
+      All.Results$C.Nonfluorescent.sdCh1peak <- NaN
+      All.Results$C.Red.meanCh2peak <- NaN               # Columns 24-27; from Res$Ch2.peaks
+      All.Results$C.Blue.meanCh2peak <- NaN              
+      All.Results$C.Undefined.meanCh2peak <- NaN         
+      All.Results$C.Nonfluorescent.meanCh2peak <- NaN  
+      All.Results$C.Red.sdCh2peak <- NaN               # Columns 28-31; from Res$Ch2.sds
+      All.Results$C.Blue.sdCh2peak <- NaN              
+      All.Results$C.Undefined.sdCh2peak <- NaN         
+      All.Results$C.Nonfluorescent.sdCh2peak <- NaN  
+      
+    } else{
+      FCDP_prey <- rbind(FCDP_prey,vec2)
+      FCDP_meso <- rbind(FCDP_meso,vec)
+    }
+    
+    # Add relevant data for this sample
+    All.Results$Flask[i] <- name_flask
+    All.Results$Day[i] <- today
+    All.Results$Time[i] <- flask_time
+    All.Results$Dilution[i] <- flask_dil
+    All.Results$Aspirated.vol[i] <- round(Asp.vol,3)
+    All.Results$Meso[i] <- Meso_designation
+    All.Results$Prey[i] <- prey_designation
+    All.Results$Replicate[i] <- expt_rep
+    All.Results$Medium[i] <- medium
+    
+    #Running the partitioning function for Mesodinium
+
+    if(dim(vec)[1] > 0){ # If there are Mesodinium in the dataset
+      Res <- Meso.flowPeaks(vec,name_flask,today,create_plot = create_plot_meso,unknown.partition = unk.part.Meso, bluegreen.partition = bg.part.Meso)
+      #Assigning partitioned data for Mesodinium
+      All.Results[i,10:16] <- Res$counts
+      All.Results[i,17:20] <- Res$Ch1.peaks
+      All.Results[i,21:24] <- Res$Ch1.peaks.sd
+      All.Results[i,25:28] <- Res$Ch2.peaks
+      All.Results[i,29:32] <- Res$Ch2.peaks.sd
+    }
+    
+    if(dim(vec2)[1] > 0){ # If there are cryptophytes in the dataset
+      #Running flowPeaks for Prey
+      Res.crypto <- Meso.flowPeaks(vec2,name_flask,today,create_plot = create_plot_prey,unknown.partition = unk.part.prey, bluegreen.partition = bg.part.prey)
+      #Assigning partitioned data for Prey
+      All.Results[i,33:39] <- Res.crypto$counts
+      All.Results[i,40:43] <- Res.crypto$Ch1.peaks
+      All.Results[i,44:47] <- Res.crypto$Ch1.peaks.sd
+      All.Results[i,48:51] <- Res.crypto$Ch2.peaks
+      All.Results[i,52:55] <- Res.crypto$Ch2.peaks.sd
+    }
+    
+    if(i == length(list.files(current_folder))){
+        FCDP_prey <- FCDP_prey %>% mutate(Partition = "Prey")
+        FCDP_meso <- FCDP_meso %>% mutate(Partition = "Mesodinium")
+        FCDP_all <- rbind(FCDP_meso,FCDP_prey)
+      
+      
+      Res_name <- paste(CSV_folder,"/Summary_",expt.day[dir_idx],".csv",sep = "")
+      FCDP_name <- paste(CSV_folder,"/FCDP_all_",expt.day[dir_idx],".csv",sep = "")
+      
+      write.csv(All.Results,Res_name,row.names = F)
+      write.csv(FCDP_all,FCDP_name,row.names = F)
+    }
+  }
+  
+  if(dir_idx == 1){
+    All.Results.Concat <- All.Results
+  } else{
+    All.Results.Concat <- rbind(All.Results.Concat, All.Results)
+  }
+  
+  if(dir_idx == length(Folder_list)){
+    All_res_name <- paste("All_Summary",".csv",sep='')
+    write.csv(All.Results.Concat,All_res_name,row.names = F)
+  }
+  
+}
+
+
+```
+
+```{r}
+ARC <- All.Results.Concat[All.Results.Concat$Meso=="MRTA",] # Shortening the variable name
+Preyref <- All.Results.Concat[All.Results.Concat$Meso=="0000",]
+
+# Calculating concentrations of cells (in cells per mL), normalizing to the aspirated volume and adjusting for dilution
+ARC$M.pmL <- ARC$TotalMeso/ARC$Aspirated.vol*ARC$Dilu
+ARC$M.pmL.red <- ARC$M.TotRed/ARC$Aspirated.vol*ARC$Dilu
+ARC$M.pmL.blue <- ARC$M.TotBlue/ARC$Aspirated.vol*ARC$Dilu
+
+ARC$C.pmL <- ARC$TotalCrypto/ARC$Aspirated.vol*ARC$Dilu
+ARC$C.pmL.red <- ARC$C.TotRed/ARC$Aspirated.vol*ARC$Dilu
+ARC$C.pmL.blue <- ARC$C.TotBlue/ARC$Aspirated.vol*ARC$Dilu
+
+# Calculating proportion of blue-green cryptophytes
+ARC$C.propblue <- ARC$C.pmL.blue/ARC$C.pmL
+
+# Rounding day to whole number so that we can group by timepoint in downstream calculations
+ARC$Day.Numeric <- round(ARC$Time,digits=0)
+
+```
+
+### Fluorescence/plastid dynamics
+#### Scatterplot of pigmentation
+Use a subset of datapoints
+```{r}
+numcells2use <- 200
+
+# Concatenate data
+FCDP_name <- paste(CSV_folder,"/FCDP_all_",expt.day[1],".csv",sep = "")
+FCDP <- read.csv(FCDP_name)
+FCDP.Meso.00 <- FCDP[FCDP$Class=='Mesodinium' & FCDP$Prey=='00',]
+if(dim(FCDP.Meso.00)[1] > numcells2use){
+  rows2use <- sample(c(1:dim(FCDP.Meso.00)[1]),numcells2use)
+  FCDP.Meso.00 <- FCDP.Meso.00[rows2use,]
+}
+FCDP.Meso.HP <- FCDP[FCDP$Class=='Mesodinium' & FCDP$Prey=='HP',]
+if(dim(FCDP.Meso.HP)[1] > numcells2use){
+  rows2use <- sample(c(1:dim(FCDP.Meso.HP)[1]),numcells2use)
+  FCDP.Meso.HP <- FCDP.Meso.HP[rows2use,]
+}
+
+for(i in 2:length(expt.day)){
+  FCDP_name <- paste(CSV_folder,"/FCDP_all_",expt.day[i],".csv",sep = "")
+  FCDP <- read.csv(FCDP_name)
+  FCDP.Meso.00.hold <- FCDP[FCDP$Class=='Mesodinium' & FCDP$Prey=='00',]
+  if(dim(FCDP.Meso.00.hold)[1] > numcells2use){
+    rows2use <- sample(c(1:dim(FCDP.Meso.00.hold)[1]),numcells2use)
+    FCDP.Meso.00.hold <- FCDP.Meso.00.hold[rows2use,]
+  }
+  FCDP.Meso.HP.hold <- FCDP[FCDP$Class=='Mesodinium' & FCDP$Prey=='HP',]    
+  if(dim(FCDP.Meso.HP.hold)[1] > numcells2use){
+    rows2use <- sample(c(1:dim(FCDP.Meso.HP.hold)[1]),numcells2use)
+    FCDP.Meso.HP.hold <- FCDP.Meso.HP.hold[rows2use,]
+  }
+  FCDP.Meso.00 <- rbind(FCDP.Meso.00,FCDP.Meso.00.hold)
+  FCDP.Meso.HP <- rbind(FCDP.Meso.HP,FCDP.Meso.HP.hold)
+}
+
+
+```
+
+Extract the fluorescent particles -- HP-fed
+```{r}
+# Step 1: Partition dataset to just fluorescent particles
+dataset.fluo <- FCDP.Meso.HP[FCDP.Meso.HP$Ch1.Peak>0,]
+dataset.fluo <- dataset.fluo[dataset.fluo$Ch2.Peak>0,]
+  
+# Step 2: Use flowPeaks package to fit and visualize the number of clusters of points
+invisible(capture.output(fp <- suppressMessages(flowPeaks(dataset.fluo[,c("Ch1.Peak",'Ch2.Peak')],tol=.1,h0=.4))))
+      # The "capture.output" function captures the printed output of the flowPeaks function
+      # The "invisible" function suppresses that output so it doesn't automatically print.
+      # The "suppressMessages" function suppresses the messages output of flowPeaks
+
+# Step 3: Extract cluster assignments
+dataset.fluo$peak <- fp$peaks.cluster
+
+# Step 4: Assign clusters to colors (or unknown)
+fp.data <- as.data.frame(summary(fp))
+fp.data$plastid.color <- 'red' # Presume plastids are red in color
+for(i in 1:dim(fp.data)[1]){
+  if(fp.data$Ch1.Peak.center[i] < unk.part.Meso){ # If they fall below the unknown threshold, assign them "black" color for unknown
+    fp.data$plastid.color[i] <- 'black'
+  } else{ #If not unknown, then assign them "blue" color for bluegreen plastid type
+  if(fp.data$Ch2.Peak.center[i] < bg.part.Meso){
+    fp.data$plastid.color[i] <- 'blue'
+  }
+}}
+dataset.fluo$peak.Ch1 <- fp.data$Ch1.Peak.center[match(dataset.fluo$peak,fp.data$cluster.id)]
+dataset.fluo$peak.Ch2 <- fp.data$Ch2.Peak.center[match(dataset.fluo$peak,fp.data$cluster.id)]
+dataset.fluo$plastidcolor <- fp.data$plastid.color[match(dataset.fluo$peak,fp.data$cluster.id)]
+  
+# Step 5: Map fluorescent data back onto the dataset for export.
+dataset.analyzed <- FCDP.Meso.HP
+dataset.analyzed$plastidcolor <- dataset.fluo$plastidcolor[match(dataset.analyzed$Capture.ID,dataset.fluo$Capture.ID)]
+if(dim(dataset.analyzed[is.na(dataset.analyzed$plastidcolor),])[1]>0){
+dataset.analyzed[is.na(dataset.analyzed$plastidcolor),]$plastidcolor <- 'nonfluorescent'}
+dataset.analyzed$plastidcolor <- factor(dataset.analyzed$plastidcolor,levels=c('red','blue','black','nonfluorescent'))
+  
+# 1. Baseline plot of all data
+    par(mfrow=c(2,2))
+    par(mar=c(2,4,2.5,0.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,ylab='Channel 2 peak (phycoerythrin)')
+    
+    # 2. Plot of flowpeaks package partitions
+    par(mar=c(2,2,2.5,2.5))
+    plot(fp)
+    
+    # 3. Plot of data with cluster assignments
+    par(mar=c(4,4,.5,.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,col=c('red','blue','cyan','green')[as.factor(dataset.fluo$peak)],xlab='Channel 1 peak (chlorophyll)',ylab='Channel 2 peak (phycoerythrin)')
+    
+    # 4. Plot of data assigned by plastid type
+    par(mar=c(4,2,.5,2.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,col=dataset.fluo$plastidcolor,xlab='Channel 1 peak (chlorophyll)')
+
+FCDP.Meso.HP.hasplastid <- dataset.fluo[dataset.fluo$plastidcolor!='black',]
+```
+
+Extract the fluorescent particles -- starved
+```{r}
+# Step 1: Partition dataset to just fluorescent particles
+dataset.fluo <- FCDP.Meso.00[FCDP.Meso.00$Ch1.Peak>0,]
+dataset.fluo <- dataset.fluo[dataset.fluo$Ch2.Peak>0,]
+  
+# Step 2: Use flowPeaks package to fit and visualize the number of clusters of points
+invisible(capture.output(fp <- suppressMessages(flowPeaks(dataset.fluo[,c("Ch1.Peak",'Ch2.Peak')],tol=.1,h0=.4))))
+      # The "capture.output" function captures the printed output of the flowPeaks function
+      # The "invisible" function suppresses that output so it doesn't automatically print.
+      # The "suppressMessages" function suppresses the messages output of flowPeaks
+
+# Step 3: Extract cluster assignments
+dataset.fluo$peak <- fp$peaks.cluster
+
+# Step 4: Assign clusters to colors (or unknown)
+fp.data <- as.data.frame(summary(fp))
+fp.data$plastid.color <- 'red' # Presume plastids are red in color
+for(i in 1:dim(fp.data)[1]){
+  if(fp.data$Ch1.Peak.center[i] < unk.part.Meso){ # If they fall below the unknown threshold, assign them "black" color for unknown
+    fp.data$plastid.color[i] <- 'black'
+  } else{ #If not unknown, then assign them "blue" color for bluegreen plastid type
+  if(fp.data$Ch2.Peak.center[i] < bg.part.Meso){
+    fp.data$plastid.color[i] <- 'blue'
+  }
+}}
+dataset.fluo$peak.Ch1 <- fp.data$Ch1.Peak.center[match(dataset.fluo$peak,fp.data$cluster.id)]
+dataset.fluo$peak.Ch2 <- fp.data$Ch2.Peak.center[match(dataset.fluo$peak,fp.data$cluster.id)]
+dataset.fluo$plastidcolor <- fp.data$plastid.color[match(dataset.fluo$peak,fp.data$cluster.id)]
+  
+# Step 5: Map fluorescent data back onto the dataset for export.
+dataset.analyzed <- FCDP.Meso.00
+dataset.analyzed$plastidcolor <- dataset.fluo$plastidcolor[match(dataset.analyzed$Capture.ID,dataset.fluo$Capture.ID)]
+if(dim(dataset.analyzed[is.na(dataset.analyzed$plastidcolor),])[1]>0){
+dataset.analyzed[is.na(dataset.analyzed$plastidcolor),]$plastidcolor <- 'nonfluorescent'}
+dataset.analyzed$plastidcolor <- factor(dataset.analyzed$plastidcolor,levels=c('red','blue','black','nonfluorescent'))
+  
+# 1. Baseline plot of all data
+    par(mfrow=c(2,2))
+    par(mar=c(2,4,2.5,0.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,ylab='Channel 2 peak (phycoerythrin)')
+    
+    # 2. Plot of flowpeaks package partitions
+    par(mar=c(2,2,2.5,2.5))
+    plot(fp)
+    
+    # 3. Plot of data with cluster assignments
+    par(mar=c(4,4,.5,.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,col=c('red','blue','cyan','green')[as.factor(dataset.fluo$peak)],xlab='Channel 1 peak (chlorophyll)',ylab='Channel 2 peak (phycoerythrin)')
+    
+    # 4. Plot of data assigned by plastid type
+    par(mar=c(4,2,.5,2.5))
+    plot(dataset.fluo$Ch1.Peak,dataset.fluo$Ch2.Peak,col=dataset.fluo$plastidcolor,xlab='Channel 1 peak (chlorophyll)')
+
+FCDP.Meso.00.hasplastid <- dataset.fluo[dataset.fluo$plastidcolor!='black',]
+```
+
+
+```{r SFIG fluorescence scatterplot, fig.height=4, fig.width=9.5,warning=F}
+
+xlimits <- c(5.3,6.5)
+ylimits <- c(3.5,6.75)
+
+TAto00cols2 <- colorRampPalette(c('indianred3','gray90'))
+TAto00cols2 <- colorRampPalette(c(TAcol,'gray80'))
+TAto00colset2 <- addalpha(TAto00cols2(length(expt.day)),.5)
+
+TAtoHPcols2 <- colorRampPalette(c('indianred3','gray90','paleturquoise4'))
+TAtoHPcols2 <- colorRampPalette(c(TAcol,'gray90',HPcol))
+TAtoHPcolset2 <- addalpha(TAtoHPcols2(length(expt.day)),.5)
+
+p1 <- FCDP.Meso.00.hasplastid %>%
+  ggplot(aes(x=Ch1.Peak, y = Ch2.Peak, color=as.factor(Day)))+
+  geom_point() +
+  theme(legend.position='left', 
+        panel.background = element_rect(color='gray20',size=1,fill='white'),
+        panel.grid.major=element_line(colour="gray80"),
+        panel.grid.minor=element_line(colour="gray80")) +
+  scale_color_manual(values=TAto00colset2,name = "Day") +
+  xlab('Channel 1 peak (chlorophyll fluorescence)') +
+  ylab('Channel 2 peak (phycoerythrin fluorescence)') +
+  scale_x_continuous(limits = xlimits) +
+  scale_y_continuous(limits = ylimits) + 
+  annotate("text", x=5.5, y=6.65, label= expression(paste('(A) Starved')), cex = 5) 
+  #annotate("text", x=6.37, y=3.6, label= expression(paste('(A) Starved')), cex = 5) 
+p2 <- ggMarginal(p1,type='histogram',groupColour=TRUE,groupFill=TRUE)
+p5 <- ggMarginal(p1,groupColour=TRUE)#,groupFill=TRUE)
+
+
+p3 <- FCDP.Meso.HP.hasplastid %>%
+  ggplot(aes(x=Ch1.Peak, y = Ch2.Peak, color=as.factor(Day)))+
+  geom_point() +
+  theme(legend.position='left', 
+        panel.background = element_rect(color='gray20',size=1,fill='white'),
+        panel.grid.major=element_line(colour="gray80"),
+        panel.grid.minor=element_line(colour="gray80")) +
+  scale_color_manual(values=TAtoHPcolset2,name = "Day") +
+  xlab('Channel 1 peak (chlorophyll fluorescence)') +
+  ylab('Channel 2 peak (phycoerythrin fluorescence)') +
+  scale_x_continuous(limits = xlimits) +
+  scale_y_continuous(limits = ylimits) + 
+  annotate("text", x=5.63, y=6.65, label= expression(paste('(B) Fed ',italic('H. pacifica'))), cex = 5) 
+p6 <- ggMarginal(p3,type='histogram',groupColour=TRUE,groupFill=TRUE)
+p7 <- ggMarginal(p3,groupColour=TRUE)#,groupFill=TRUE)
+
+plot_grid(p5,p7)
+
+```
+
+#### Cell size
+
+```{r SFIG cell size,fig.height=3,fig.width=4}
+FCDP.Meso.00.hasplastid$Volscale <- FCDP.Meso.00.hasplastid$Volume..ABD./1000
+FCDP.Meso.HP.hasplastid$Volscale <- FCDP.Meso.HP.hasplastid$Volume..ABD./1000
+cellVol.00 <- summarySE(data=FCDP.Meso.00.hasplastid,'Volscale','Day',na.rm=T)
+cellVol.HP <- summarySE(data=FCDP.Meso.HP.hasplastid,'Volscale','Day',na.rm=T)
+
+par(mar=c(4,4,1,1))
+plot(cellVol.00$Day,cellVol.00$Volscale,type='n',xlab='',ylab='',ylim=c(7,10.500),las=1)
+mtext('Experimental Day',side=1,line=2.3)
+mtext('Estimated cell volume',side=2,line=2.8)
+arrows(cellVol.HP$Day,cellVol.HP$Volscale+cellVol.HP$se,cellVol.HP$Day,cellVol.HP$Volscale-cellVol.HP$se,code=3,angle=90,length=0.01,col='black')
+arrows(cellVol.00$Day,cellVol.00$Volscale+cellVol.00$se,cellVol.00$Day,cellVol.00$Volscale-cellVol.00$se,code=3,angle=90,length=0.01,col='black')
+lines(cellVol.00$Day,cellVol.00$Volscale)
+lines(cellVol.HP$Day,cellVol.HP$Volscale)
+points(cellVol.HP$Day,cellVol.HP$Volscale,pch=21,col='black',bg='black',cex=1.5)
+points(cellVol.00$Day,cellVol.00$Volscale,pch=21,col='black',bg='white',cex=1.5)
+legend(x='topleft',inset=c(0,0),legend=c('Starved',expression(paste('Fed ',italic('H. pacifica')))),bty='n',pch=21,pt.bg=c('white','black'),pt.cex=1.5)
+
+```
+
+With additional cell properties
+
+
+```{r SFIG cell properties,fig.height=5,fig.width=3}
+
+par(mar=c(0,4,4,1),mfrow=c(3,1))
+
+FCDP.Meso.00.hasplastid$Volscale <- FCDP.Meso.00.hasplastid$Volume..ABD./1000
+FCDP.Meso.HP.hasplastid$Volscale <- FCDP.Meso.HP.hasplastid$Volume..ABD./1000
+cellVol.00 <- summarySE(data=FCDP.Meso.00.hasplastid,'Volscale','Day',na.rm=T)
+cellVol.HP <- summarySE(data=FCDP.Meso.HP.hasplastid,'Volscale','Day',na.rm=T)
+
+plot(cellVol.00$Day,cellVol.00$Volscale,type='n',xlab='',ylab='',ylim=c(6.5,11),las=1,xaxt='n'); axis(side=1,labels=F)
+#mtext('Experimental Day',side=1,line=2.3)
+mtext('Estimated cell volume',side=2,line=2.8,cex=.7)
+arrows(cellVol.HP$Day,cellVol.HP$Volscale+cellVol.HP$se,cellVol.HP$Day,cellVol.HP$Volscale-cellVol.HP$se,code=3,angle=90,length=0.01,col='black')
+arrows(cellVol.00$Day,cellVol.00$Volscale+cellVol.00$se,cellVol.00$Day,cellVol.00$Volscale-cellVol.00$se,code=3,angle=90,length=0.01,col='black')
+lines(cellVol.00$Day,cellVol.00$Volscale)
+lines(cellVol.HP$Day,cellVol.HP$Volscale)
+points(cellVol.HP$Day,cellVol.HP$Volscale,pch=21,col='black',bg='black',cex=1.5)
+points(cellVol.00$Day,cellVol.00$Volscale,pch=21,col='black',bg='white',cex=1.5)
+legend(x='topleft',legend=c(''),title='(a)',bty='n',cex=1.1)
+
+# Cell perimeter
+FCDP.Meso.00.hasplastid$Volscale <- FCDP.Meso.00.hasplastid$Perimeter 
+FCDP.Meso.HP.hasplastid$Volscale <- FCDP.Meso.HP.hasplastid$Perimeter
+
+cellVol.00 <- summarySE(data=FCDP.Meso.00.hasplastid,'Volscale','Day',na.rm=T)
+cellVol.HP <- summarySE(data=FCDP.Meso.HP.hasplastid,'Volscale','Day',na.rm=T)
+
+par(mar=c(2,4,2,1))
+plot(cellVol.00$Day,cellVol.00$Volscale,type='n',xlab='',ylab='',las=1,xaxt='n',ylim=c(103,122)); axis(side=1,labels=F)
+mtext('Cell perimeter',side=2,line=2.8,cex=.7)
+#mtext('Experimental Day',side=1,line=2.3)
+arrows(cellVol.HP$Day,cellVol.HP$Volscale+cellVol.HP$se,cellVol.HP$Day,cellVol.HP$Volscale-cellVol.HP$se,code=3,angle=90,length=0.01,col='black')
+arrows(cellVol.00$Day,cellVol.00$Volscale+cellVol.00$se,cellVol.00$Day,cellVol.00$Volscale-cellVol.00$se,code=3,angle=90,length=0.01,col='black')
+lines(cellVol.00$Day,cellVol.00$Volscale)
+lines(cellVol.HP$Day,cellVol.HP$Volscale)
+points(cellVol.HP$Day,cellVol.HP$Volscale,pch=21,col='black',bg='black',cex=1.5)
+points(cellVol.00$Day,cellVol.00$Volscale,pch=21,col='black',bg='white',cex=1.5)
+legend(x='topleft',legend=c(''),title='(b)',bty='n',cex=1.1)
+
+# Length:width ratio
+FCDP.Meso.00.hasplastid$Volscale <- FCDP.Meso.00.hasplastid$Length/FCDP.Meso.00.hasplastid$Width 
+FCDP.Meso.HP.hasplastid$Volscale <- FCDP.Meso.HP.hasplastid$Length/FCDP.Meso.HP.hasplastid$Width
+
+cellVol.00 <- summarySE(data=FCDP.Meso.00.hasplastid,'Volscale','Day',na.rm=T)
+cellVol.HP <- summarySE(data=FCDP.Meso.HP.hasplastid,'Volscale','Day',na.rm=T)
+
+par(mar=c(4,4,0,1))
+plot(cellVol.00$Day,cellVol.00$Volscale,type='n',xlab='',ylab='',las=1,ylim=c(1.21,1.35))
+mtext('Experimental Day',side=1,line=2.3,cex=.7)
+mtext('Cell length : width ratio',side=2,line=2.8,cex=.7)
+arrows(cellVol.HP$Day,cellVol.HP$Volscale+cellVol.HP$se,cellVol.HP$Day,cellVol.HP$Volscale-cellVol.HP$se,code=3,angle=90,length=0.01,col='black')
+arrows(cellVol.00$Day,cellVol.00$Volscale+cellVol.00$se,cellVol.00$Day,cellVol.00$Volscale-cellVol.00$se,code=3,angle=90,length=0.01,col='black')
+lines(cellVol.00$Day,cellVol.00$Volscale)
+lines(cellVol.HP$Day,cellVol.HP$Volscale)
+points(cellVol.HP$Day,cellVol.HP$Volscale,pch=21,col='black',bg='black',cex=1.5)
+points(cellVol.00$Day,cellVol.00$Volscale,pch=21,col='black',bg='white',cex=1.5)
+legend(x='bottomright',inset=c(0,0),legend=c('Starved',expression(paste('Fed ',italic('H. pacifica')))),bty='n',pch=21,pt.bg=c('white','black'),pt.cex=1.5)
+legend(x='topleft',legend=c(''),title='(c)',bty='n',cex=1.1)
+
+
+```
+
+
+
+#### Line plots of plastid content
+Find composite fluorescence values
+```{r}
+ARC$M.meanch1peak <- (ARC$M.pmL.red*ARC$M.Red.meanCh1peak+ARC$M.pmL.blue*ARC$M.Blue.meanCh1peak)/ARC$M.pmL
+ARC$M.meanch2peak <- (ARC$M.pmL.red*ARC$M.Red.meanCh2peak+ARC$M.pmL.blue*ARC$M.Blue.meanCh2peak)/ARC$M.pmL
+for(i in 1:dim(ARC)[1]){
+  if(is.na(ARC$M.meanch1peak[i])){
+    if(is.na(ARC$M.Blue.meanCh1peak[i])){ 
+      ARC$M.meanch1peak[i] <- ARC$M.Red.meanCh1peak[i]
+    }
+  }
+  if(is.na(ARC$M.meanch2peak[i])){
+    if(is.na(ARC$M.Blue.meanCh2peak[i])){
+      ARC$M.meanch2peak[i] <- ARC$M.Red.meanCh2peak[i]
+    }
+  }
+  if(is.na(ARC$M.meanch1peak[i])){
+    if(is.na(ARC$M.Red.meanCh1peak[i])){
+      ARC$M.meanch1peak[i] <- ARC$M.Blue.meanCh1peak[i]
+    }
+  }
+  if(is.na(ARC$M.meanch2peak[i])){
+    if(is.na(ARC$M.Red.meanCh2peak[i])){
+      ARC$M.meanch2peak[i] <- ARC$M.Blue.meanCh2peak[i]
+    }
+  }
+}
+
+```
+
+Using calibration to turn into prop cell volume with PC and PE plastids
+```{r}
+ARC$prop.PE.predict <- ((ARC$M.meanch2peak-sqrt.PE.b)/sqrt.PE.a)^2
+ARC$prop.PC.predict <- (ARC$M.meanch1peak-lm.Chl.a-lm.Chl.c*ARC$prop.PE.predict)/lm.Chl.b
+for(i in 1:dim(ARC)[1]){
+  ARC$prop.PC.predict[i] <- max(0,ARC$prop.PC.predict[i])
+}
+ARC$prop.plastid.predict <- ARC$prop.PE.predict+ARC$prop.PC.predict
+```
+
+```{r FIG4 Long Term Plastid Dynamics, fig.height=2.5, fig.width=7.5,warning=F}
+par(mar=c(4,4,1,1),mfrow=c(1,3))
+
+pointcolor <- 'black'
+pointcolor.bg <- 'gray80'
+
+
+plot(jitter(ARC$Day.Numeric,.4),ARC$prop.PE.predict,las=1,xlab='Time (days)',ylab=expression(paste('Prop. cell volume ',italic('T. amphioxeia'),' plastids')),pch=21,bg=c('white',pointcolor.bg)[as.factor(ARC$Prey)],col=pointcolor.bg,cex=1.5)
+
+Summ.Prey <- summarySE(data=ARC, 'prop.PE.predict', groupvars=c('Day.Numeric','Prey'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$prop.PE.predict+Summ.Prey$se,Summ.Prey$Day.Numeric,Summ.Prey$prop.PE.predict-Summ.Prey$se,code=3,angle=90,length=.02)
+for(i in 1:length(unique(Summ.Prey$Prey))){
+  subdat <- Summ.Prey[Summ.Prey$Prey==unique(Summ.Prey$Prey)[i],]
+  lines(subdat$Day.Numeric,subdat$prop.PE.predict)
+}
+points(Summ.Prey$Day.Numeric,Summ.Prey$prop.PE.predict,pch=21,cex=1.5,bg=c('white',pointcolor)[as.factor(Summ.Prey$Prey)])
+
+legend(x='bottomleft',inset=c(0.03,0.03),legend=c('Starved',expression(paste('Fed ',italic('H. pacifica')))),pch=21,col='black',pt.bg=c('white',pointcolor),pt.cex=1.5,cex=.8)
+text(x=0.5,y=0.6,'(A)')
+
+
+# Panel B: Phycocyanin plastids
+plot(jitter(ARC$Day.Numeric,.4),ARC$prop.PC.predict,las=1,xlab='Time (days)',ylab=expression(paste('Prop. cell volume ',italic('H. pacifica'),' plastids')),pch=21,bg=c('white',pointcolor.bg)[as.factor(ARC$Prey)],col=pointcolor.bg,cex=1.5)
+
+Summ.Prey <- summarySE(data=ARC, 'prop.PC.predict', groupvars=c('Day.Numeric','Prey'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$prop.PC.predict+Summ.Prey$se,Summ.Prey$Day.Numeric,Summ.Prey$prop.PC.predict-Summ.Prey$se,code=3,angle=90,length=.02)
+for(i in 1:length(unique(Summ.Prey$Prey))){
+  subdat <- Summ.Prey[Summ.Prey$Prey==unique(Summ.Prey$Prey)[i],]
+  lines(subdat$Day.Numeric,subdat$prop.PC.predict)
+}
+points(Summ.Prey$Day.Numeric,Summ.Prey$prop.PC.predict,pch=21,cex=1.5,bg=c('white',pointcolor)[as.factor(Summ.Prey$Prey)])
+text(x=0.5,y=0.207,'(B)')
+
+# Panel C: All Plastids
+plot(jitter(ARC$Day.Numeric,.4),ARC$prop.plastid.predict,las=1,xlab='Time (days)',ylab='Prop. cell volume containing plastids',pch=21,bg=c('white',pointcolor.bg)[as.factor(ARC$Prey)],col=pointcolor.bg,cex=1.5,ylim=c(0,0.61))
+
+Summ.Prey <- summarySE(data=ARC, 'prop.plastid.predict', groupvars=c('Day.Numeric','Prey'))
+arrows(Summ.Prey$Day.Numeric,Summ.Prey$prop.plastid.predict+Summ.Prey$se,Summ.Prey$Day.Numeric,Summ.Prey$prop.plastid.predict-Summ.Prey$se,code=3,angle=90,length=.02)
+for(i in 1:length(unique(Summ.Prey$Prey))){
+  subdat <- Summ.Prey[Summ.Prey$Prey==unique(Summ.Prey$Prey)[i],]
+  lines(subdat$Day.Numeric,subdat$prop.plastid.predict)
+}
+points(Summ.Prey$Day.Numeric,Summ.Prey$prop.plastid.predict,pch=21,cex=1.5,bg=c('white',pointcolor)[as.factor(Summ.Prey$Prey)])
+text(x=0.5,y=0.6,'(C)')
+```
+
+
+### Population dynamics
+```{r}
+# Read in cell count data
+dat <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/LongTermExpt/Mrubrum_fedHP_FunctionalResponseCurves - LTExp_16Dec2023.csv")
+
+# Read in photophysiology data
+dat <- dat[!is.na(dat$Flask),]
+fire <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/LongTermExpt/Mrubrum_fedHP_FunctionalResponseCurves - LTExp_PECurves.csv")
+fire <- fire[fire$Exp=='LT',]
+
+MRcolumns <- which(substr(colnames(dat),1,6)=='corMR.')
+scaleMRcolumns <- which(substr(colnames(dat),1,9)=='altcorMR.')
+HPcolumns <- which(substr(colnames(dat),1,3)=='HP.')
+Ratiocolumns <- which(substr(colnames(dat),1,6)=='Ratio.')
+Chlcolumns <- which(substr(colnames(dat),1,4)=='Chl.')
+TotChlcolumns <- which(substr(colnames(dat),1,7)=='TotChl.')
+days <- as.numeric(as.character(str_extract(colnames(dat[,MRcolumns]),  "\\d+$")))
+days[10] <- 8.2
+days.chl <- as.numeric(as.character(str_extract(colnames(dat[,Chlcolumns]),  "\\d+$")))
+
+treats <- unique(dat$Treat)
+flasks <- unique(dat$Flask)
+
+feedpts <- c(2.3,3.3,5.3,7.1,11.1,13.1,14.3,16.3,18.4)
+feedvols <- c(0.4,1,2,3,1,3,2,1,1)
+
+dilupts <- c(8)
+
+# Special parameters, etc
+Cfix.mult <- 0.01728178 # The multiplier 0.01728178 converts from electrons per chlorophyll molecule per second into pg C per pg chlorophyll-a per hour
+```
+
+```{r SFIG long term population dynamics,fig.height=2.5,fig.width=7.5,warning=F}
+
+par(mar=c(4,4,1,.5),mfrow=c(1,3))
+
+ax.lab.cex <- 0.7
+
+# M. rubrum data
+plot(jitter(days,.4),dat[1,MRcolumns],las=1,xlab='',ylab='', type='n',ylim=c(min(dat[,MRcolumns],na.rm=T),max(dat[,MRcolumns],na.rm = T))/1000, xlim=c(min(days)-.1,max(days)+.1),log='y')
+abline(v=dilupts,lty=3)
+mtext(expression(paste(italic('M. rubrum'),' (',10^3,' cells ',mL^-1,')')),side=2,line=2.2,cex=ax.lab.cex)
+mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+for(i in 1:length(treats)){
+  subdat <- dat[dat$Treat==treats[i],]
+  for(j in 1:dim(dat)[1]){
+    points(jitter(days,0.4),subdat[j,MRcolumns]/1000,pch=21,bg=TAcols.bg[i],col=TAcol.bg,cex=1.5)
+  }
+  lines(days,colMeans(subdat[,MRcolumns],na.rm=T)/1000)
+}
+for(i in 1:length(days)){
+  for(j in 1:length(treats)){
+    subdat <- dat[dat$Treat==treats[j],]
+    arrows(days[i],mean(subdat[,MRcolumns[i]],na.rm=T)/1000+se(subdat[,MRcolumns[i]])/1000,days[i],mean(subdat[,MRcolumns[i]],na.rm=T)/1000-se(subdat[,MRcolumns[i]])/1000, angle=90, code = 3, length=0.03)
+    points(days[i],mean(subdat[,MRcolumns[i]],na.rm=T)/1000,pch=21,cex=1.5,col='black',bg=TAcols[j])
+  }
+}
+text(dilupts-1.5,.95*rep(min(dat[,MRcolumns]/1000,na.rm=T),length(dilupts)),rep('Dilution',length(dilupts)),pos=4,srt=90)
+
+# H. pacifica data
+subdat <- dat[dat$Treat==2,]
+plot(jitter(days,.4),subdat[1,HPcolumns],las=1,xlab='',ylab='', type='n',ylim=c(min(subdat[,HPcolumns],na.rm=T),max(subdat[,HPcolumns],na.rm = T))/1000,xlim=c(min(days)-.1,max(days)+.1),log='y')
+abline(v=feedpts,lty=2)
+abline(v=dilupts,lty=3)
+mtext(expression(paste('Cryptophytes (',10^3,' cells ',mL^-1,')')),side=2,line=2,cex=ax.lab.cex)
+mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+for(j in 1:dim(subdat)[1]){
+    points(jitter(days,0.4),subdat[j,HPcolumns]/1000,pch=21,bg=HPcols.bg[2],col=HPcol.bg,cex=1.5)
+}
+lines(days,colMeans(subdat[,HPcolumns],na.rm=T)/1000)
+for(i in 1:length(days)){
+  arrows(days[i],mean(subdat[,HPcolumns[i]],na.rm=T)/1000+se(subdat[,HPcolumns[i]])/1000,days[i],mean(subdat[,HPcolumns[i]],na.rm=T)/1000-se(subdat[,HPcolumns[i]])/1000, angle=90, code = 3, length=0.03)
+  points(days[i],mean(subdat[,HPcolumns[i]],na.rm=T)/1000,pch=21,cex=1.5,col='black',bg=HPcols[2])
+}
+text(feedpts+.3,rep(max(subdat[,HPcolumns]/1000)*1.03,length(feedpts)),rep('Pulse fed',length(feedpts)),pos=2,srt=90)
+text(dilupts+.0,.93*rep(min(subdat[,HPcolumns]/1000,na.rm=T),length(dilupts)),rep('Dilution',length(dilupts)),pos=4,srt=90)
+
+# Ratio
+subdat <- dat[dat$Treat==2,]
+plot(jitter(days,.4),subdat[1,Ratiocolumns],las=1,xlab='',ylab='', type='n',ylim=c(min(subdat[,Ratiocolumns],na.rm=T), max(subdat[,Ratiocolumns],na.rm = T)),xlim=c(min(days)-.1,max(days)+.1))
+abline(v=feedpts,lty=2)
+abline(v=dilupts,lty=3)
+mtext(expression(paste('Cryptophytes : ',italic('M. rubrum'))),side=2,line=2.3,cex=ax.lab.cex)
+mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+for(j in 1:dim(subdat)[1]){
+    points(jitter(days,0.4),subdat[j,Ratiocolumns],pch=21,bg='gray80',col='gray60',cex=1.5)
+}
+lines(days,colMeans(subdat[,Ratiocolumns],na.rm=T))
+for(i in 1:length(days)){
+  arrows(days[i],mean(subdat[,Ratiocolumns[i]],na.rm=T)+se(subdat[,Ratiocolumns[i]]),days[i],mean(subdat[,Ratiocolumns[i]],na.rm=T)-se(subdat[,Ratiocolumns[i]]), angle=90, code = 3, length=0.03)
+  points(days[i],mean(subdat[,Ratiocolumns[i]],na.rm=T),pch=21,cex=1.5,col='black',bg='gray30')
+}
+text(feedpts+.3,rep(max(subdat[,Ratiocolumns]*1.02,na.rm = T),length(feedpts)),rep('Pulse fed',length(feedpts)),pos=2,srt=90)
+text(dilupts+.0,-.3,rep('Dilution',length(dilupts)),pos=4,srt=90)
+
+```
+
+### M. rubrum growth rate
+
+```{r}
+grwindow <- 4 # number of datapoints required for a growth rate calculation
+
+numcalcs <- length(days) - grwindow + 1
+
+gr.data <- as.data.frame(rep(flasks,each=numcalcs))
+colnames(gr.data) <- 'Flask'
+gr.data$Treat <- dat$Treat[match(gr.data$Flask,dat$Flask)]
+gr.data$MeanDay <- NaN
+gr.data$GrowthRate <- NaN
+gr.data$GrowthRateErr <- NaN
+
+
+for(i in 1:6){
+  for(j in 1:numcalcs){
+    if(sum(days[j:(j+grwindow-1)]%in%c(8,8.2))!=2){ # if the dilution point is not in the string of numbers
+    gr.data$MeanDay[(i-1)*numcalcs + j] <- mean(days[j:(j+grwindow-1)])
+    lm1 <- lm(t(log(dat[dat$Flask==flasks[i],MRcolumns[j:(j+grwindow-1)]]))~days[j:(j+grwindow-1)])
+    gr.data$GrowthRate[(i-1)*numcalcs + j] <- summary(lm1)$coefficients[2,1]
+    gr.data$GrowthRateErr[(i-1)*numcalcs + j] <- summary(lm1)$coefficients[2,2]
+  }}}
+
+
+```
+
+```{r FIG M rubrum long term growth,fig.height=4,fig.width=8}
+
+gr.data <- gr.data[!is.na(gr.data$GrowthRate),]
+
+monochromecols <- c('white','black')
+monochromecols.bg <- c('white','gray80')
+
+par(mar=c(4,4,1,1),mfrow=c(1,2))
+
+# M. rubrum data
+plot(jitter(days,.4),dat[1,scaleMRcolumns],las=1,xlab='Experimental day',ylab='', type='n',ylim=c(min(dat[,scaleMRcolumns],na.rm=T),max(dat[,scaleMRcolumns],na.rm = T))/1000, xlim=c(min(days)-.1,max(days)+.1),log='y')
+#abline(v=dilupts,lty=3)
+mtext(expression(paste('Scaled ',italic('M. rubrum'),' popn. (',10^3,' cells ',mL^-1,')')),side=2,line=2,cex=1)
+#mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+for(i in 1:length(treats)){
+  subdat <- dat[dat$Treat==treats[i],]
+  for(j in 1:dim(dat)[1]){
+    points(jitter(days,0.4),subdat[j,scaleMRcolumns]/1000,pch=21,bg=monochromecols.bg[i],col=monochromecols.bg,cex=1.5)
+  }
+  lines(days,colMeans(subdat[,scaleMRcolumns],na.rm=T)/1000)
+}
+for(i in 1:length(days)){
+  for(j in 1:length(treats)){
+    subdat <- dat[dat$Treat==treats[j],]
+    arrows(days[i],mean(subdat[,scaleMRcolumns[i]],na.rm=T)/1000+se(subdat[,scaleMRcolumns[i]])/1000,days[i],mean(subdat[,scaleMRcolumns[i]],na.rm=T)/1000-se(subdat[,scaleMRcolumns[i]])/1000, angle=90, code = 3, length=0.03)
+    points(days[i],mean(subdat[,scaleMRcolumns[i]],na.rm=T)/1000,pch=21,cex=1.5,col='black',bg=monochromecols[j])
+  }
+}
+text(0.25,37,'(A)')
+
+# Growth rates
+grwindow <- 7 # number of datapoints required for a growth rate calculation
+numcalcs <- length(days) - grwindow + 1
+gr.data <- as.data.frame(rep(flasks[1:6],each=numcalcs))
+colnames(gr.data) <- 'Flask'
+gr.data$Treat <- dat$Treat[match(gr.data$Flask,dat$Flask)]
+gr.data$MeanDay <- NaN
+gr.data$GrowthRate <- NaN
+gr.data$GrowthRateErr <- NaN
+
+for(i in 1:6){
+  for(j in 1:numcalcs){
+    gr.data$MeanDay[(i-1)*numcalcs + j] <- mean(days[j:(j+grwindow-1)])
+    lm1 <- lm(t(log(dat[dat$Flask==flasks[i],scaleMRcolumns[j:(j+grwindow-1)]]))~days[j:(j+grwindow-1)])
+    gr.data$GrowthRate[(i-1)*numcalcs + j] <- summary(lm1)$coefficients[2,1]
+    gr.data$GrowthRateErr[(i-1)*numcalcs + j] <- summary(lm1)$coefficients[2,2]
+}}
+
+plot(jitter(gr.data$MeanDay,.5),gr.data$GrowthRate,las=1,xlab='Experimental day',ylab=expression(paste(italic('M. rubrum'),' growth rate (',d^-1,')')),pch=21,cex=1.5,bg=monochromecols.bg[as.factor(gr.data$Treat)],col='gray80')
+growth.summ <- summarySE(data=gr.data,measurevar='GrowthRate',groupvars=c('MeanDay','Treat'))
+#abline(v=dilupts,lty=3)
+for(i in 1:length(treats)){
+  subdat <- growth.summ[growth.summ$Treat==treats[i],]
+  lines(subdat$MeanDay,subdat$GrowthRate)
+  arrows(subdat$MeanDay,subdat$GrowthRate + subdat$se, subdat$MeanDay, subdat$GrowthRate - subdat$se, code=3, angle = 90, length = 0.03)
+  points(subdat$MeanDay,subdat$GrowthRate,pch=21, cex= 1.5, col='black', bg = monochromecols[i])
+}
+
+legend(x='bottomleft',inset=c(-0.0,-0.02),legend=c('Starved',expression(paste('Fed ',italic('H. pacifica')))),pch=21,pt.cex=1.5,col='black',pt.bg=monochromecols,bty='n')
+
+text(3.25,0.28,'(B)')
+```
+
+Stacked vertically
+```{r FIG vertical M rubrum long term growth,fig.height=7,fig.width=4}
+
+gr.data <- gr.data[!is.na(gr.data$GrowthRate),]
+
+monochromecols <- c('white','black')
+monochromecols.bg <- c('white','gray80')
+
+par(mar=c(1,4,3,1),mfrow=c(2,1))
+
+# M. rubrum data
+plot(jitter(days,.4),dat[1,scaleMRcolumns],las=1,xlab='Experimental day',ylab='', type='n',ylim=c(min(dat[,scaleMRcolumns],na.rm=T),max(dat[,scaleMRcolumns],na.rm = T))/1000, xlim=c(min(days)-.1,max(days)+.1),log='y',xaxt='n')
+axis(side=1,labels=F)
+#abline(v=dilupts,lty=3)
+mtext(expression(paste('Scaled ',italic('M. rubrum'),' popn. (',10^3,' cells ',mL^-1,')')),side=2,line=2,cex=1)
+#mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+for(i in 1:length(treats)){
+  subdat <- dat[dat$Treat==treats[i],]
+  for(j in 1:dim(dat)[1]){
+    points(jitter(days,0.4),subdat[j,scaleMRcolumns]/1000,pch=21,bg=monochromecols.bg[i],col=monochromecols.bg,cex=1.5)
+  }
+  lines(days,colMeans(subdat[,scaleMRcolumns],na.rm=T)/1000)
+}
+for(i in 1:length(days)){
+  for(j in 1:length(treats)){
+    subdat <- dat[dat$Treat==treats[j],]
+    arrows(days[i],mean(subdat[,scaleMRcolumns[i]],na.rm=T)/1000+se(subdat[,scaleMRcolumns[i]])/1000,days[i],mean(subdat[,scaleMRcolumns[i]],na.rm=T)/1000-se(subdat[,scaleMRcolumns[i]])/1000, angle=90, code = 3, length=0.03)
+    points(days[i],mean(subdat[,scaleMRcolumns[i]],na.rm=T)/1000,pch=21,cex=1.5,col='black',bg=monochromecols[j])
+  }
+}
+text(0.25,37,'(A)')
+
+par(mar=c(4,4,0,1))
+# Growth rates
+grwindow <- 7 # number of datapoints required for a growth rate calculation
+numcalcs <- length(days) - grwindow + 1
+gr.data <- as.data.frame(rep(flasks[1:6],each=numcalcs))
+colnames(gr.data) <- 'Flask'
+gr.data$Treat <- dat$Treat[match(gr.data$Flask,dat$Flask)]
+gr.data$MeanDay <- NaN
+gr.data$GrowthRate <- NaN
+gr.data$GrowthRateErr <- NaN
+
+for(i in 1:6){
+  for(j in 1:numcalcs){
+    gr.data$MeanDay[(i-1)*numcalcs + j] <- mean(days[j:(j+grwindow-1)])
+    lm1 <- lm(t(log(dat[dat$Flask==flasks[i],scaleMRcolumns[j:(j+grwindow-1)]]))~days[j:(j+grwindow-1)])
+    gr.data$GrowthRate[(i-1)*numcalcs + j] <- summary(lm1)$coefficients[2,1]
+    gr.data$GrowthRateErr[(i-1)*numcalcs + j] <- summary(lm1)$coefficients[2,2]
+}}
+
+plot(jitter(gr.data$MeanDay,.5),gr.data$GrowthRate,las=1,xlab='',ylab=expression(paste(italic('M. rubrum'),' growth rate (',d^-1,')')),pch=21,cex=1.5,bg=monochromecols.bg[as.factor(gr.data$Treat)],col='gray80')
+mtext('Experimental day',side=1,line=2.3)
+growth.summ <- summarySE(data=gr.data,measurevar='GrowthRate',groupvars=c('MeanDay','Treat'))
+#abline(v=dilupts,lty=3)
+for(i in 1:length(treats)){
+  subdat <- growth.summ[growth.summ$Treat==treats[i],]
+  lines(subdat$MeanDay,subdat$GrowthRate)
+  arrows(subdat$MeanDay,subdat$GrowthRate + subdat$se, subdat$MeanDay, subdat$GrowthRate - subdat$se, code=3, angle = 90, length = 0.03)
+  points(subdat$MeanDay,subdat$GrowthRate,pch=21, cex= 1.5, col='black', bg = monochromecols[i])
+}
+
+legend(x='bottomleft',inset=c(-0.0,-0.02),legend=c('Starved',expression(paste('Fed ',italic('H. pacifica')))),pch=21,pt.cex=1.5,col='black',pt.bg=monochromecols,bty='n')
+
+text(3.25,0.28,'(B)')
+```
+
+### Photophysiology
+Fit PE curves to all data
+```{r fit PE curves}
+flasks <- unique(fire$Flask)
+days.fire <- unique(fire$ExpDay)
+fire$Flask.Day <- paste(fire$Flask,fire$ExpDay,sep='.')
+
+# Create PE dataframe
+PEres <- as.data.frame(cbind(rep(flasks,length(days.fire)),rep(days.fire,each=length(flasks))))
+colnames(PEres) <- c('Flask','ExpDay')
+PEres$Flask.Day <- paste(PEres$Flask,PEres$ExpDay,sep='.')
+PEres$Treatment <- fire$Treatment[match(PEres$Flask,fire$Flask)]
+PEres$Prey <- fire$Prey[match(PEres$Flask,fire$Flask)]
+PEres$Rep <- fire$Rep[match(PEres$Flask,fire$Flask)]
+PEres$TargetHP <- fire$TargetHP[match(PEres$Flask,fire$Flask)]
+
+
+PEres$FvFm <- fire[fire$PAR==0,]$Fv.Fm[match(PEres$Flask.Day,fire[fire$PAR==0,]$Flask.Day)]
+PEres$P.est <- NA
+PEres$a.est <- NA
+PEres$Pmax <- NA
+PEres$Pmax.err <- NA
+PEres$Pmax.p <- NA
+PEres$a <- NA
+PEres$a.err <- NA
+PEres$a.p <- NA
+PEres$Ek <- NA
+PEres$P_I <- NA
+PEres$P_I.C <- NA
+PEres$P.interp <- NA
+
+PARset <- seq(from =0, to = max(fire$PAR,na.rm=T), length.out = 100)  # Create a holding vector of light levels to use for plotting later
+
+# Fit curves
+for(i in 1:(dim(PEres)[1])){
+	if((i-1)%%30 == 0){   # plot results in 30-panel figures
+		par(mar=c(1,1,1,1),mfrow=c(5,6))
+	}
+	
+	subdat <- fire[fire$Flask.Day==PEres$Flask.Day[i],]   # Subset the data
+	
+	if(!is.na(subdat$PAR[1])){
+	
+	plot(subdat$PAR, subdat$ETR,xlim=c(0,300),ylim=c(0,300)); text(max(PARset)*0.5,5,PEres$Flask.Day[i])  # Plot the raw data
+	
+	PEres$FvFm[i] <- subdat[subdat$PAR==0,]$Fv.Fm # Save FvFm
+	
+	for(j in 1:dim(subdat)[1]){if(subdat$ETR[j]<0){subdat$ETR[j]<- NaN}} #  Remove negative values for ETR
+  # note: usually points with negative qpcoef are those that are difficult to fit. in some cases, you can comment the following line of code to include those points
+  for(j in 1:dim(subdat)[1]){if(subdat$qp.coeff[j]<0){subdat$ETR[j]<- NaN}} #  Remove negative values for qp coef
+  
+	#for(j in 5:dim(subdat[1])){if(!is.nan(subdat$ETR[j-1])){if(!is.nan(subdat$ETR[j])){
+	#  if(subdat$ETR[j] > 1.3*subdat$ETR[j-1]){subdat$ETR[j]<-NaN}}}
+
+	
+	P.est <- max(subdat$ETR,na.rm=TRUE)
+	PEres$P.est[i] <- P.est
+	a.est <- lm(subdat$ETR[1:3]~subdat$PAR[1:3])$coef[2]
+  PEres$a.est[i] <- a.est
+	
+	points(subdat$PAR,subdat$ETR,col='red')
+	
+	rm(nls.summ)
+	try({
+	  nls.summ <- summary(nls(ETR ~ P * tanh(a * PAR / P), data= subdat, start = list(P = P.est, a = a.est),nls.control(tol=1e-7))) })  # Do curve fit; 'try' wrapper prevents an error from causing the program to crash
+	
+	if(exists("nls.summ")){ # Only save these data if the curve fit was successful
+	PEres$Pmax[i] <- nls.summ$p[1,1]   # Save various statistical parameters
+	PEres$Pmax.err[i] <- nls.summ$p[1,2]
+	PEres$Pmax.p[i] <- nls.summ$p[1,4]
+	PEres$a[i] <- nls.summ$p[2,1]
+	PEres$a.err[i] <- nls.summ$p[2,2]
+	PEres$a.p[i] <- nls.summ$p[2,4]
+	PEres$P.interp[i] <- interp1(subdat$PAR,subdat$ETR,xi=20)
+	
+	predictset <- PEres$Pmax[i]*tanh(PEres$a[i]*PARset/PEres$Pmax[i])  
+	lines(PARset,predictset, col='royalblue3')  # Overlay the curve fit
+	predictset2 <- P.est*tanh(a.est*PARset/P.est)  
+	lines(PARset,predictset2, col='green')  # Overlay the curve fit
+  }}}
+
+PEres$Ek <- PEres$Pmax / PEres$a
+PEres$P_I <- PEres$Pmax * tanh(PEres$a * 20 / PEres$Pmax)
+PEres$P_I.C <- PEres$P_I* Cfix.mult
+PEres$P.interp.C <- PEres$P.interp* Cfix.mult
+
+# Export data
+
+# # # write.csv(PEres,'/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/LongTermExpt/PEres.csv')
+```
+We'll incorporate data from reference cryptophyte PE curves as well
+```{r import reference prey PE curves}
+HP.ref <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/Mrubrum_fedHP_FunctionalResponseCurves - Exp2_PECurves.csv")
+HP.ref <- HP.ref[HP.ref$TargetMR==0&HP.ref$Treatment%in%c(3,5),]
+HP.ref <- read.csv("/Users/hollyvm/GoogleSync/Mesodinium/Mrubrum_fedHP/LongTermExpt/Mrubrum_fedHP_FunctionalResponseCurves - LTExp_PECurves.csv")
+TA.ref <- HP.ref[HP.ref$Treatment=='TA',]
+HP.ref <- HP.ref[HP.ref$Treatment=='HP',]
+
+```
+
+```{r SFIG PE curve transition,fig.height=4, fig.width=8}
+# Color spectrum for experimental days
+TAto00cols2 <- colorRampPalette(c(TAcol,'gray80'))
+TAto00colset2 <- addalpha(TAto00cols2(length(days.fire)),.5)
+TAto00colset <- TAto00cols2(length(days.fire))
+
+TAtoHPcols2 <- colorRampPalette(c(TAcol,'gray90',HPcol))
+TAtoHPcolset2 <- addalpha(TAtoHPcols2(length(expt.day)),.5)
+TAtoHPcolset <- TAtoHPcols2(length(expt.day))
+
+PARset2 <- seq(from = 0, to = 340, length.out=200)
+
+par(mar=c(4,3.5,1,0),mfrow=c(1,2))
+# Panel 1: Treatment 1
+subdat <- PEres[PEres$Treatment==1,]
+subdat.fire <- fire[fire$Treatment==1,]
+plot(subdat.fire$PAR,subdat.fire$ETR,xlim=c(0,333),ylim=c(0,295),type='n',xlab='',ylab='',las=1)
+mtext(expression(paste('Electron transport rate (e- chl-',italic(a)^-1,' ',s^-1,')')),side=2,line=2.5)
+for(i in 1:length(days.fire)){
+  subdat.fire <- fire[fire$Treatment==1 & fire$ExpDay==days.fire[i],]
+  points(subdat.fire$PAR,subdat.fire$ETR,pch=21,bg=TAto00colset2[i],col=TAto00colset2[i])
+  nls.summ <- summary(nls(ETR ~ P * tanh(a * PAR / P), data= subdat.fire, start = list(P = P.est, a = a.est),nls.control(tol=1e-7)))
+  Pmax.fit <- nls.summ$p[1,1]   # Save various statistical parameters
+	a.fit <- nls.summ$p[2,1]
+	predictset <- Pmax.fit*tanh(a.fit*PARset/Pmax.fit)  
+	lines(PARset,predictset, col=TAto00colset[i],lwd=2)  # Overlay the curve fit
+}
+text(x=-10,y=285,'(A) Starved',pos=4)
+text(x=293,y=265,'Day 0',pos=4,cex=.7)
+text(x=293,y=193,'Day 10',pos=4,cex=.7,col=TAto00colset[7])
+text(x=293,y=93,'Day 22',pos=4,cex=.7,col=TAto00colset[length(days.fire)])
+
+# Add reference line from HP data
+#points(HP.ref$PAR,HP.ref$ETR,col=addalpha(HPcol.bg,.2),bg=addalpha(HPcol.bg,.2),pch=21)
+nls.summ <- summary(nls(ETR ~ P * tanh(a * PAR / P), data= HP.ref, start = list(P = P.est, a = a.est),nls.control(tol=1e-7)))
+Pmax.fit <- nls.summ$p[1,1]   # Save various statistical parameters
+a.fit <- nls.summ$p[2,1]
+predictset <- Pmax.fit*tanh(a.fit*PARset2/Pmax.fit)  
+lines(PARset2,predictset, col='gray30',lwd=2,lty=3)
+text(335,Pmax.fit*.88,expression(paste('Free-living ',italic('H. pacifica'))),pos=2,cex=.7,col='black')
+
+# Add reference line from TA data
+#points(TA.ref$PAR,TA.ref$ETR,col=addalpha(TAcol.bg,.2),bg=addalpha(TAcol.bg,.2),pch=21)
+nls.summ <- summary(nls(ETR ~ P * tanh(a * PAR / P), data= TA.ref, start = list(P = P.est, a = a.est),nls.control(tol=1e-7)))
+Pmax.fit <- nls.summ$p[1,1]   # Save various statistical parameters
+a.fit <- nls.summ$p[2,1]
+predictset <- Pmax.fit*tanh(a.fit*PARset2/Pmax.fit)  
+lines(PARset2,predictset, col='gray30',lwd=2,lty=2)
+text(335,Pmax.fit*.96,expression(paste('Free-living ',italic('T. amphioxeia'))),pos=2,cex=.7,col='black')
+
+
+# Panel 1: Treatment 1
+par(mar=c(4,1,1,2.5))
+subdat.fire <- fire[fire$Treatment==2,]
+plot(subdat.fire$PAR,subdat.fire$ETR,xlim=c(0,333),ylim=c(0,295),type='n',xlab='',ylab='',las=1,yaxt='n')
+axis(side=2,labels=F)
+mtext(expression(paste('Light level (μmol quanta ',m^-2,' ',s^-1,')')),side=1,line=2.3,at=-30)
+for(i in 1:length(days.fire)){
+  subdat.fire <- fire[fire$Treatment==2 & fire$ExpDay==days.fire[i],]
+  points(subdat.fire$PAR,subdat.fire$ETR,pch=21,bg=TAtoHPcolset2[i],col=TAtoHPcolset2[i])
+  nls.summ <- summary(nls(ETR ~ P * tanh(a * PAR / P), data= subdat.fire, start = list(P = P.est, a = a.est),nls.control(tol=1e-7)))
+  Pmax.fit <- nls.summ$p[1,1]   # Save various statistical parameters
+	a.fit <- nls.summ$p[2,1]
+	predictset <- Pmax.fit*tanh(a.fit*PARset/Pmax.fit)  
+	lines(PARset,predictset, col=TAtoHPcolset[i],lwd=2)  # Overlay the curve fit
+}
+text(x=-10,y=285,expression(paste('(B) Fed ',italic('H. pacifica'))),pos=4)
+text(x=293,y=252,'Day 0',pos=4,cex=.7)
+text(x=293,y=170,'Day 10',pos=4,cex=.7,col=TAto00colset[7])
+text(x=293,y=60,'Day 22',pos=4,cex=.7,col=TAto00colset[length(days.fire)])
+
+# Add reference line from HP data
+#points(HP.ref$PAR,HP.ref$ETR,col=addalpha(HPcol.bg,.2),bg=addalpha(HPcol.bg,.2),pch=21)
+nls.summ <- summary(nls(ETR ~ P * tanh(a * PAR / P), data= HP.ref, start = list(P = P.est, a = a.est),nls.control(tol=1e-7)))
+Pmax.fit <- nls.summ$p[1,1]   # Save various statistical parameters
+a.fit <- nls.summ$p[2,1]
+predictset <- Pmax.fit*tanh(a.fit*PARset2/Pmax.fit)  
+lines(PARset2,predictset, lwd=2,lty=3, col='gray30') #col=addalpha(HPcol.bg,.8),
+#text(315,Pmax.fit*.85,expression(paste('Free-living ',italic('H. pacifica'))),pos=2,cex=.85,col='black')
+HPfit <- nls.summ
+
+# Add reference line from TA data
+#points(TA.ref$PAR,TA.ref$ETR,col=addalpha(TAcol.bg,.2),bg=addalpha(TAcol.bg,.2),pch=21)
+nls.summ <- summary(nls(ETR ~ P * tanh(a * PAR / P), data= TA.ref, start = list(P = P.est, a = a.est),nls.control(tol=1e-7)))
+Pmax.fit <- nls.summ$p[1,1]   # Save various statistical parameters
+a.fit <- nls.summ$p[2,1]
+predictset <- Pmax.fit*tanh(a.fit*PARset2/Pmax.fit)  
+lines(PARset2,predictset, col='gray30',lwd=2,lty=2)
+#text(315,Pmax.fit*.93,expression(paste('Free-living ',italic('T. amphioxeia'))),pos=2,cex=.85,col='black')
+TAfit <- nls.summ
+
+```
+
+```{r,fig.height=4, fig.width=8}
+# Color spectrum for experimental days
+TAto00cols2 <- colorRampPalette(c('black','gray80'))
+TAto00colset2 <- addalpha(TAto00cols2(length(days.fire)),.5)
+TAto00colset <- TAto00cols2(length(days.fire))
+
+TAtoHPcols2 <- colorRampPalette(c('black','gray90'))
+TAtoHPcolset2 <- addalpha(TAtoHPcols2(length(expt.day)),.5)
+TAtoHPcolset <- TAtoHPcols2(length(expt.day))
+
+PARset2 <- seq(from = 0, to = 340, length.out=200)
+
+par(mar=c(4,3.5,1,0),mfrow=c(1,2))
+# Panel 1: Treatment 1
+subdat <- PEres[PEres$Treatment==1,]
+subdat.fire <- fire[fire$Treatment==1,]
+plot(subdat.fire$PAR,subdat.fire$ETR,xlim=c(0,333),ylim=c(0,295),type='n',xlab='',ylab='',las=1)
+mtext(expression(paste('Electron transport rate (e- chl-',italic(a)^-1,' ',s^-1,')')),side=2,line=2.5)
+for(i in 1:length(days.fire)){
+  subdat.fire <- fire[fire$Treatment==1 & fire$ExpDay==days.fire[i],]
+  points(subdat.fire$PAR,subdat.fire$ETR,pch=21,bg=TAto00colset2[i],col=TAto00colset2[i])
+  nls.summ <- summary(nls(ETR ~ P * tanh(a * PAR / P), data= subdat.fire, start = list(P = P.est, a = a.est),nls.control(tol=1e-7)))
+  Pmax.fit <- nls.summ$p[1,1]   # Save various statistical parameters
+	a.fit <- nls.summ$p[2,1]
+	predictset <- Pmax.fit*tanh(a.fit*PARset/Pmax.fit)  
+	lines(PARset,predictset, col=TAto00colset[i],lwd=2)  # Overlay the curve fit
+}
+text(x=-10,y=285,'Starved',pos=4)
+text(x=293,y=265,'Day 0',pos=4,cex=.7)
+text(x=293,y=193,'Day 10',pos=4,cex=.7,col=TAto00colset[7])
+text(x=293,y=93,'Day 22',pos=4,cex=.7,col=TAto00colset[length(days.fire)])
+
+# Add reference line from HP data
+#points(HP.ref$PAR,HP.ref$ETR,col=addalpha(HPcol.bg,.2),bg=addalpha(HPcol.bg,.2),pch=21)
+nls.summ <- summary(nls(ETR ~ P * tanh(a * PAR / P), data= HP.ref, start = list(P = P.est, a = a.est),nls.control(tol=1e-7)))
+Pmax.fit <- nls.summ$p[1,1]   # Save various statistical parameters
+a.fit <- nls.summ$p[2,1]
+predictset <- Pmax.fit*tanh(a.fit*PARset2/Pmax.fit)  
+lines(PARset2,predictset, col='gray30',lwd=2,lty=2)
+text(335,Pmax.fit*.88,expression(paste('Free-living ',italic('H. pacifica'))),pos=2,cex=.7,col='black')
+
+# Add reference line from TA data
+#points(TA.ref$PAR,TA.ref$ETR,col=addalpha(TAcol.bg,.2),bg=addalpha(TAcol.bg,.2),pch=21)
+nls.summ <- summary(nls(ETR ~ P * tanh(a * PAR / P), data= TA.ref, start = list(P = P.est, a = a.est),nls.control(tol=1e-7)))
+Pmax.fit <- nls.summ$p[1,1]   # Save various statistical parameters
+a.fit <- nls.summ$p[2,1]
+predictset <- Pmax.fit*tanh(a.fit*PARset2/Pmax.fit)  
+lines(PARset2,predictset, col='gray30',lwd=2,lty=2)
+text(335,Pmax.fit*.96,expression(paste('Free-living ',italic('T. amphioxeia'))),pos=2,cex=.7,col='black')
+
+
+# Panel 1: Treatment 1
+par(mar=c(4,1,1,2.5))
+subdat.fire <- fire[fire$Treatment==2,]
+plot(subdat.fire$PAR,subdat.fire$ETR,xlim=c(0,333),ylim=c(0,295),type='n',xlab='',ylab='',las=1,yaxt='n')
+axis(side=2,labels=F)
+mtext(expression(paste('Light level (μmol quanta ',m^-2,' ',s^-1,')')),side=1,line=2.3,at=-30)
+for(i in 1:length(days.fire)){
+  subdat.fire <- fire[fire$Treatment==2 & fire$ExpDay==days.fire[i],]
+  points(subdat.fire$PAR,subdat.fire$ETR,pch=21,bg=TAtoHPcolset2[i],col=TAtoHPcolset2[i])
+  nls.summ <- summary(nls(ETR ~ P * tanh(a * PAR / P), data= subdat.fire, start = list(P = P.est, a = a.est),nls.control(tol=1e-7)))
+  Pmax.fit <- nls.summ$p[1,1]   # Save various statistical parameters
+	a.fit <- nls.summ$p[2,1]
+	predictset <- Pmax.fit*tanh(a.fit*PARset/Pmax.fit)  
+	lines(PARset,predictset, col=TAtoHPcolset[i],lwd=2)  # Overlay the curve fit
+}
+text(x=-10,y=285,expression(paste('Fed ',italic('H. pacifica'))),pos=4)
+text(x=293,y=252,'Day 0',pos=4,cex=.7)
+text(x=293,y=170,'Day 10',pos=4,cex=.7,col=TAto00colset[7])
+text(x=293,y=60,'Day 22',pos=4,cex=.7,col=TAto00colset[length(days.fire)])
+
+# Add reference line from HP data
+#points(HP.ref$PAR,HP.ref$ETR,col=addalpha(HPcol.bg,.2),bg=addalpha(HPcol.bg,.2),pch=21)
+nls.summ <- summary(nls(ETR ~ P * tanh(a * PAR / P), data= HP.ref, start = list(P = P.est, a = a.est),nls.control(tol=1e-7)))
+Pmax.fit <- nls.summ$p[1,1]   # Save various statistical parameters
+a.fit <- nls.summ$p[2,1]
+predictset <- Pmax.fit*tanh(a.fit*PARset2/Pmax.fit)  
+lines(PARset2,predictset, lwd=2,lty=2, col='gray30') #col=addalpha(HPcol.bg,.8),
+#text(315,Pmax.fit*.85,expression(paste('Free-living ',italic('H. pacifica'))),pos=2,cex=.85,col='black')
+HPfit <- nls.summ
+
+# Add reference line from TA data
+#points(TA.ref$PAR,TA.ref$ETR,col=addalpha(TAcol.bg,.2),bg=addalpha(TAcol.bg,.2),pch=21)
+nls.summ <- summary(nls(ETR ~ P * tanh(a * PAR / P), data= TA.ref, start = list(P = P.est, a = a.est),nls.control(tol=1e-7)))
+Pmax.fit <- nls.summ$p[1,1]   # Save various statistical parameters
+a.fit <- nls.summ$p[2,1]
+predictset <- Pmax.fit*tanh(a.fit*PARset2/Pmax.fit)  
+lines(PARset2,predictset, col='gray30',lwd=2,lty=2)
+#text(315,Pmax.fit*.93,expression(paste('Free-living ',italic('T. amphioxeia'))),pos=2,cex=.85,col='black')
+TAfit <- nls.summ
+
+```
+
+
+Chlorophyll content and photophysiology metrics. 
+
+```{r,fig.height=2.5*2,fig.width=7.5,warning=F}
+Chlcols <- c('white','black')
+Chlcols.bg <- c('white','gray70')
+Chlcol.bg <- 'gray70'
+
+par(mfrow=c(2,3))
+
+ax.lab.cex <- 0.7
+
+jittamt <- 1
+
+# First row
+par(mar=c(1,4,4,.5))
+# Chlorophyll per cell
+plot(jitter(days.chl,jittamt),dat[1,Chlcolumns],las=1,xlab='',ylab='', type='n',ylim=c(min(dat[,Chlcolumns],na.rm=T),max(dat[,Chlcolumns],na.rm = T)), xlim=c(min(days.chl)-.1,max(days.chl)+.1),xaxt='n'); axis(side=1,labels=F)
+mtext(expression(paste('Cellular chlorophyll (pg chl-',italic('a'),' ',cell^-1,')')),side=2,line=2.2,cex=ax.lab.cex)
+#mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+for(i in 1:length(treats)){
+  subdat <- dat[dat$Treat==treats[i],]
+  for(j in 1:dim(dat)[1]){
+    points(jitter(days.chl,0.4),subdat[j,Chlcolumns],pch=21,bg=Chlcols.bg[i],col=Chlcol.bg,cex=1.5)
+  }
+  lines(days.chl,colMeans(subdat[,Chlcolumns]))
+}
+for(i in 1:length(days.chl)){
+  for(j in 1:length(treats)){
+    subdat <- dat[dat$Treat==treats[j],]
+    arrows(days.chl[i],mean(subdat[,Chlcolumns[i]])+se(subdat[,Chlcolumns[i]]),days.chl[i],mean(subdat[,Chlcolumns[i]])-se(subdat[,Chlcolumns[i]]), angle=90, code = 3, length=0.03)
+    points(days.chl[i],mean(subdat[,Chlcolumns[i]]),pch=21,cex=1.5,col='black',bg=Chlcols[j])
+  }
+}
+legend(x='topright',inset=c(.01,.01), legend=c('Starved',expression(paste('Fed ',italic('H. pacifica')))),pch=21,pt.bg=Chlcols,pt.cex=1.5, bty='n')
+text(0.3,33,'(A)')
+
+# # Chlorophyll per mL
+# Chlcol.bg <- 'black'
+# 
+# plot(jitter(days.chl,jittamt),dat[1,TotChlcolumns],las=1,xlab='',ylab='', type='n',ylim=c(min(dat[,TotChlcolumns],na.rm=T),max(dat[,TotChlcolumns],na.rm = T)), xlim=c(min(days.chl)-.1,max(days.chl)+.1))
+# mtext(expression(paste('Total chlorophyll (ng chl-',italic('a'),' ',mL^-1,')')),side=2,line=2.2,cex=ax.lab.cex)
+# mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+# for(i in 1:length(treats)){
+#   subdat <- dat[dat$Treat==treats[i],]
+#   for(j in 1:dim(dat)[1]){
+#     points(jitter(days.chl,0.4),subdat[j,TotChlcolumns],pch=21,bg=Chlcols.bg[i],col=Chlcol.bg,cex=1.5)
+#   }
+#   lines(days.chl,colMeans(subdat[,TotChlcolumns]))
+# }
+# for(i in 1:length(days.chl)){
+#   for(j in 1:length(treats)){
+#     subdat <- dat[dat$Treat==treats[j],]
+#     arrows(days.chl[i],mean(subdat[,TotChlcolumns[i]])+se(subdat[,TotChlcolumns[i]]),days.chl[i],mean(subdat[,TotChlcolumns[i]])-se(subdat[,TotChlcolumns[i]]), angle=90, code = 3, length=0.03)
+#     points(days.chl[i],mean(subdat[,TotChlcolumns[i]]),pch=21,cex=1.5,col='black',bg=Chlcols[j])
+#   }
+# }
+
+
+# Fv/Fm
+plot(jitter(PEres$ExpDay,jittamt),PEres$FvFm,las=1,xlab='',ylab='', pch=21, col=Chlcol.bg, bg = Chlcols.bg[as.factor(PEres$Treatment)], cex=1.5, xlim=c(min(PEres$ExpDay)-.1,max(PEres$ExpDay)+.1),ylim=c(.41,.58),xaxt='n'); axis(side=1,labels=F)
+mtext(expression(paste('Photosynthetic efficiency, (',F[v],' / ',F[m],')')),side=2,line=2.6,cex=ax.lab.cex)
+#mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+FvFmsumm <- summarySE(data = PEres, 'FvFm',groupvars=c('ExpDay','Treatment'))
+for(i in 1:length(treats)){
+  subdat <- FvFmsumm[FvFmsumm$Treatment==treats[i],]
+  lines(subdat$ExpDay,subdat$FvFm)
+  arrows(subdat$ExpDay, subdat$FvFm+subdat$se, subdat$ExpDay, subdat$FvFm-subdat$se, angle=90, code = 3, length=0.03)
+  points(subdat$ExpDay,subdat$FvFm, cex=1.5, col='black',bg=Chlcols[i], pch=21)
+}
+# HP reference
+abline(h = mean(HP.ref[HP.ref$PAR==0,]$Fv.Fm),lty=3)
+# TA reference
+abline(h = mean(TA.ref[HP.ref$PAR==0,]$Fv.Fm),lty=2)
+points(0.3,.58,pch=22,bg='white',col='white',cex=2); text(0.3,0.575,'(B)')
+
+# P_I.C
+plot(jitter(PEres$ExpDay,jittamt),PEres$P_I.C,las=1,xlab='',ylab='', pch=21, col=Chlcol.bg, bg = Chlcols.bg[as.factor(PEres$Treatment)], cex=1.5, xlim=c(min(PEres$ExpDay)-.1,max(PEres$ExpDay)+.1),ylim=c(.3,.58),xaxt='n')
+axis(side=1,labels=F)
+mtext(expression(paste('Phot. rate, ',P[I][,][C],' (pg C pg chl-',italic('a')^-1,' h',r^-1,')')),side=2,line=2.6,cex=ax.lab.cex)
+#mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+FvFmsumm <- summarySE(data = PEres, 'P_I.C',groupvars=c('ExpDay','Treatment'))
+for(i in 1:length(treats)){
+  subdat <- FvFmsumm[FvFmsumm$Treatment==treats[i],]
+  lines(subdat$ExpDay,subdat$P_I.C)
+  arrows(subdat$ExpDay, subdat$P_I.C+subdat$se, subdat$ExpDay, subdat$P_I.C-subdat$se, angle=90, code = 3, length=0.03)
+  points(subdat$ExpDay,subdat$P_I.C, cex=1.5, col='black',bg=Chlcols[i], pch=21)
+}
+# HP reference
+abline(h = HPfit$p[1,1] * tanh(HPfit$p[2,1] * 20 / HPfit$p[1,1])* Cfix.mult,lty=3)
+# TA reference
+abline(h = TAfit$p[1,1] * tanh(TAfit$p[2,1] * 20 / TAfit$p[1,1])* Cfix.mult,lty=2)
+points(0.3,.57,pch=21,bg='white',col='white',cex=3); text(0.3,0.57,'(C)')
+
+# Second row
+par(mar=c(4,4,1,.5))
+
+# Pmax
+#Chlcol.bg <- 'gray70'
+
+plot(jitter(PEres$ExpDay,jittamt),PEres$Pmax,las=1,xlab='',ylab='', pch=21, col=Chlcol.bg, bg = Chlcols.bg[as.factor(PEres$Treatment)], cex=1.5, xlim=c(min(PEres$ExpDay)-.1,max(PEres$ExpDay)+.1))
+mtext(expression(paste('Max. phot., ',P[m][a][x],' (e- molec. chl-',italic('a')^-1,' ',s^-1,')')),side=2,line=2.6,cex=ax.lab.cex)
+mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+FvFmsumm <- summarySE(data = PEres, 'Pmax',groupvars=c('ExpDay','Treatment'))
+for(i in 1:length(treats)){
+  subdat <- FvFmsumm[FvFmsumm$Treatment==treats[i],]
+  lines(subdat$ExpDay,subdat$Pmax)
+  arrows(subdat$ExpDay, subdat$Pmax+subdat$se, subdat$ExpDay, subdat$Pmax-subdat$se, angle=90, code = 3, length=0.03)
+  points(subdat$ExpDay,subdat$Pmax, cex=1.5, col='black',bg=Chlcols[i], pch=21)
+}
+# HP reference
+abline(h = HPfit$p[1,1],lty=3)
+# TA reference
+abline(h = TAfit$p[1,1],lty=2)
+points(0.3,293,pch=21,bg='white',col='white',cex=3); text(0.3,293,'(D)')
+
+# a
+plot(jitter(PEres$ExpDay,jittamt),PEres$a,las=1,xlab='',ylab='', pch=21, col=Chlcol.bg, bg = Chlcols.bg[as.factor(PEres$Treatment)], cex=1.5, xlim=c(min(PEres$ExpDay)-.1,max(PEres$ExpDay)+.1),ylim=c(0.9,1.8))
+mtext(expression(paste('Light sensitivity, a')),side=2,line=2.9,cex=ax.lab.cex)
+mtext(expression(paste('(e- ',m^2,' μmol chl-',italic('a')^-1,' ',quanta^-1,')')),side=2,line=1.9,cex=ax.lab.cex)
+mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+FvFmsumm <- summarySE(data = PEres, 'a',groupvars=c('ExpDay','Treatment'))
+for(i in 1:length(treats)){
+  subdat <- FvFmsumm[FvFmsumm$Treatment==treats[i],]
+  lines(subdat$ExpDay,subdat$a)
+  arrows(subdat$ExpDay, subdat$a+subdat$se, subdat$ExpDay, subdat$a-subdat$se, angle=90, code = 3, length=0.03)
+  points(subdat$ExpDay,subdat$a, cex=1.5, col='black',bg=Chlcols[i], pch=21)
+}
+# HP reference
+abline(h = HPfit$p[2,1],lty=3)
+# TA reference
+abline(h = TAfit$p[2,1],lty=2)
+points(0.3,1.785,pch=21,bg='white',col='white',cex=3); text(0.3,1.785,'(E)')
+
+# E_k
+plot(jitter(PEres$ExpDay,jittamt),PEres$Ek,las=1,xlab='',ylab='', pch=21, col=Chlcol.bg, bg = Chlcols.bg[as.factor(PEres$Treatment)], cex=1.5, xlim=c(min(PEres$ExpDay)-.1,max(PEres$ExpDay)+.1))
+mtext(expression(paste('Saturating light intensity, ',E[k])),side=2,line=2.6,cex=ax.lab.cex)
+mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+FvFmsumm <- summarySE(data = PEres, 'Ek',groupvars=c('ExpDay','Treatment'))
+for(i in 1:length(treats)){
+  subdat <- FvFmsumm[FvFmsumm$Treatment==treats[i],]
+  lines(subdat$ExpDay,subdat$Ek)
+  arrows(subdat$ExpDay, subdat$Ek+subdat$se, subdat$ExpDay, subdat$Ek-subdat$se, angle=90, code = 3, length=0.03)
+  points(subdat$ExpDay,subdat$Ek, cex=1.5, col='black',bg=Chlcols[i], pch=21)
+}
+# HP reference
+abline(h = HPfit$p[1,1]/HPfit$p[2,1],lty=3)
+# TA reference
+abline(h = TAfit$p[1,1]/TAfit$p[2,1],lty=2)
+text(-1.5,HPfit$p[1,1]/HPfit$p[2,1]*1.07,expression(paste('Free-living ',italic('H. pacifica'))),pos=4,cex=1,col='black')
+text(23.5,TAfit$p[1,1]/TAfit$p[2,1]*1.02,expression(paste('Free-living ',italic('T. amphioxeia'))),pos=2,cex=1,col='black')
+points(0.3,192,pch=21,bg='white',col='white',cex=3); text(0.3,192,'(F)')
+```
+
+
+Cleaner version
+
+```{r,fig.height=2.5*2,fig.width=7.5,warning=F}
+Chlcols <- c('white','black')
+Chlcols.bg <- c('white','gray70')
+Chlcol.bg <- 'gray70'
+
+par(mar=c(4,4,1,.5),mfrow=c(2,3))
+
+ax.lab.cex <- 0.7
+
+jittamt <- 1
+
+# Chlorophyll per cell
+plot(jitter(days.chl,jittamt),dat[1,Chlcolumns],las=1,xlab='',ylab='', type='n', xlim=c(min(days.chl)-.1,max(days.chl)+.1), ylim=c(10,32))
+mtext(expression(paste('Cellular chlorophyll (pg chl-',italic('a'),' ',cell^-1,')')),side=2,line=2.2,cex=ax.lab.cex)
+mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+for(i in 1:length(treats)){
+  subdat <- dat[dat$Treat==treats[i],]
+  for(j in 1:dim(dat)[1]){
+    #points(jitter(days.chl,0.4),subdat[j,Chlcolumns],pch=21,bg=Chlcols.bg[i],col=Chlcol.bg,cex=1.5)
+  }
+  lines(days.chl,colMeans(subdat[,Chlcolumns]))
+}
+for(i in 1:length(days.chl)){
+  for(j in 1:length(treats)){
+    subdat <- dat[dat$Treat==treats[j],]
+    arrows(days.chl[i],mean(subdat[,Chlcolumns[i]])+se(subdat[,Chlcolumns[i]]),days.chl[i],mean(subdat[,Chlcolumns[i]])-se(subdat[,Chlcolumns[i]]), angle=90, code = 3, length=0.03)
+    points(days.chl[i],mean(subdat[,Chlcolumns[i]]),pch=21,cex=1.5,col='black',bg=Chlcols[j])
+  }
+}
+legend(x='topright',inset=c(.01,.01), legend=c('Starved',expression(paste('Fed ',italic('H. pacifica')))),pch=21,pt.bg=Chlcols,pt.cex=1.5)
+
+# Chlorophyll per mL
+plot(jitter(days.chl,jittamt),dat[1,TotChlcolumns],las=1,xlab='',ylab='', type='n',ylim=c(min(dat[,TotChlcolumns],na.rm=T),max(dat[,TotChlcolumns],na.rm = T)), xlim=c(min(days.chl)-.1,max(days.chl)+.1))
+mtext(expression(paste('Total chlorophyll (ng chl-',italic('a'),' ',mL^-1,')')),side=2,line=2.4,cex=ax.lab.cex)
+mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+for(i in 1:length(treats)){
+  subdat <- dat[dat$Treat==treats[i],]
+  for(j in 1:dim(dat)[1]){
+    #points(jitter(days.chl,0.4),subdat[j,TotChlcolumns],pch=21,bg=Chlcols.bg[i],col=Chlcol.bg,cex=1.5)
+  }
+  lines(days.chl,colMeans(subdat[,TotChlcolumns]))
+}
+for(i in 1:length(days.chl)){
+  for(j in 1:length(treats)){
+    subdat <- dat[dat$Treat==treats[j],]
+    arrows(days.chl[i],mean(subdat[,TotChlcolumns[i]])+se(subdat[,TotChlcolumns[i]]),days.chl[i],mean(subdat[,TotChlcolumns[i]])-se(subdat[,TotChlcolumns[i]]), angle=90, code = 3, length=0.03)
+    points(days.chl[i],mean(subdat[,TotChlcolumns[i]]),pch=21,cex=1.5,col='black',bg=Chlcols[j])
+  }
+}
+
+
+# Fv/Fm
+plot(jitter(PEres$ExpDay,jittamt),PEres$FvFm,las=1,xlab='',ylab='', pch=21, col=Chlcol.bg, bg = Chlcols.bg[as.factor(PEres$Treatment)], cex=1.5, xlim=c(min(PEres$ExpDay)-.1,max(PEres$ExpDay)+.1),type='n',ylim=c(0.42,0.58))
+# HP reference
+abline(h = mean(HP.ref[HP.ref$PAR==0,]$Fv.Fm),lty=3)
+# TA reference
+abline(h = mean(TA.ref[HP.ref$PAR==0,]$Fv.Fm),lty=2)
+mtext(expression(paste('Photosynthetic efficiency, (',F[v],' / ',F[m],')')),side=2,line=2.6,cex=ax.lab.cex)
+mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+FvFmsumm <- summarySE(data = PEres, 'FvFm',groupvars=c('ExpDay','Treatment'))
+for(i in 1:length(treats)){
+  subdat <- FvFmsumm[FvFmsumm$Treatment==treats[i],]
+  lines(subdat$ExpDay,subdat$FvFm)
+  arrows(subdat$ExpDay, subdat$FvFm+subdat$se, subdat$ExpDay, subdat$FvFm-subdat$se, angle=90, code = 3, length=0.03)
+  points(subdat$ExpDay,subdat$FvFm, cex=1.5, col='black',bg=Chlcols[i], pch=21)
+}
+
+
+# P_I.C
+plot(jitter(PEres$ExpDay,jittamt),PEres$P_I.C,las=1,xlab='',ylab='', pch=21, col=Chlcol.bg, bg = Chlcols.bg[as.factor(PEres$Treatment)], cex=1.5, xlim=c(min(PEres$ExpDay)-.1,max(PEres$ExpDay)+.1),type='n',ylim=c(.32,.58))
+# HP reference
+abline(h = HPfit$p[1,1] * tanh(HPfit$p[2,1] * 20 / HPfit$p[1,1])* Cfix.mult,lty=3)
+# TA reference
+abline(h = TAfit$p[1,1] * tanh(TAfit$p[2,1] * 20 / TAfit$p[1,1])* Cfix.mult,lty=2)
+mtext(expression(paste('Phot. rate, ',P[I][,][C],' (pg C pg chl-',italic('a')^-1,' h',r^-1,')')),side=2,line=2.6,cex=ax.lab.cex)
+mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+FvFmsumm <- summarySE(data = PEres, 'P_I.C',groupvars=c('ExpDay','Treatment'))
+for(i in 1:length(treats)){
+  subdat <- FvFmsumm[FvFmsumm$Treatment==treats[i],]
+  lines(subdat$ExpDay,subdat$P_I.C)
+  arrows(subdat$ExpDay, subdat$P_I.C+subdat$se, subdat$ExpDay, subdat$P_I.C-subdat$se, angle=90, code = 3, length=0.03)
+  points(subdat$ExpDay,subdat$P_I.C, cex=1.5, col='black',bg=Chlcols[i], pch=21)
+}
+
+# Pmax
+plot(jitter(PEres$ExpDay,jittamt),PEres$Pmax,las=1,xlab='',ylab='', pch=21, col=Chlcol.bg, bg = Chlcols.bg[as.factor(PEres$Treatment)], cex=1.5, xlim=c(min(PEres$ExpDay)-.1,max(PEres$ExpDay)+.1),type='n')
+# HP reference
+abline(h = HPfit$p[1,1],lty=3)
+# TA reference
+abline(h = TAfit$p[1,1],lty=2)
+mtext(expression(paste('Max. phot., ',P[m][a][x],' (e- molec. chl-',italic('a')^-1,' ',s^-1,')')),side=2,line=2.4,cex=ax.lab.cex)
+mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+FvFmsumm <- summarySE(data = PEres, 'Pmax',groupvars=c('ExpDay','Treatment'))
+for(i in 1:length(treats)){
+  subdat <- FvFmsumm[FvFmsumm$Treatment==treats[i],]
+  lines(subdat$ExpDay,subdat$Pmax)
+  arrows(subdat$ExpDay, subdat$Pmax+subdat$se, subdat$ExpDay, subdat$Pmax-subdat$se, angle=90, code = 3, length=0.03)
+  points(subdat$ExpDay,subdat$Pmax, cex=1.5, col='black',bg=Chlcols[i], pch=21)
+}
+
+# # a
+# plot(jitter(PEres$ExpDay,jittamt),PEres$a,las=1,xlab='',ylab='', pch=21, col=Chlcol.bg, bg = Chlcols.bg[as.factor(PEres$Treatment)], cex=1.5, xlim=c(min(PEres$ExpDay)-.1,max(PEres$ExpDay)+.1))
+# mtext(expression(paste('Light sensitivity, a')),side=2,line=2.6,cex=ax.lab.cex)
+# mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+# FvFmsumm <- summarySE(data = PEres, 'a',groupvars=c('ExpDay','Treatment'))
+# for(i in 1:length(treats)){
+#   subdat <- FvFmsumm[FvFmsumm$Treatment==treats[i],]
+#   lines(subdat$ExpDay,subdat$a)
+#   arrows(subdat$ExpDay, subdat$a+subdat$se, subdat$ExpDay, subdat$a-subdat$se, angle=90, code = 3, length=0.03)
+#   points(subdat$ExpDay,subdat$a, cex=1.5, col='black',bg=Chlcols[i], pch=21)
+# }
+
+# E_k
+plot(jitter(PEres$ExpDay,jittamt),PEres$Ek,las=1,xlab='',ylab='', pch=21, col=Chlcol.bg, bg = Chlcols.bg[as.factor(PEres$Treatment)], cex=1.5, xlim=c(min(PEres$ExpDay)-.1,max(PEres$ExpDay)+.1),type='n')
+mtext(expression(paste('Saturating light intensity, ',E[k])),side=2,line=2.6,cex=ax.lab.cex)
+mtext('Time (days)',side=1,line=2,cex=ax.lab.cex)
+# HP reference
+abline(h = HPfit$p[1,1]/HPfit$p[2,1],lty=3)
+# TA reference
+abline(h = TAfit$p[1,1]/TAfit$p[2,1],lty=2)
+text(-1.5,HPfit$p[1,1]/HPfit$p[2,1]*1.07,expression(paste('Free-living ',italic('H. pacifica'))),pos=4,cex=1,col='black')
+text(23.5,TAfit$p[1,1]/TAfit$p[2,1]*1.02,expression(paste('Free-living ',italic('T. amphioxeia'))),pos=2,cex=1,col='black')
+FvFmsumm <- summarySE(data = PEres, 'Ek',groupvars=c('ExpDay','Treatment'))
+for(i in 1:length(treats)){
+  subdat <- FvFmsumm[FvFmsumm$Treatment==treats[i],]
+  lines(subdat$ExpDay,subdat$Ek)
+  arrows(subdat$ExpDay, subdat$Ek+subdat$se, subdat$ExpDay, subdat$Ek-subdat$se, angle=90, code = 3, length=0.03)
+  points(subdat$ExpDay,subdat$Ek, cex=1.5, col='black',bg=Chlcols[i], pch=21)
+}
+
+
+
+```
